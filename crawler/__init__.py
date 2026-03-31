@@ -2,11 +2,12 @@
 crawler/__init__.py
 Módulo de Adquisición — Oscar Insight Search (SRI 2025-2026)
 
-Exporta las clases de scraping para uso externo.
+Fuentes activas:
+  - TmdbClient           → metadatos estructurados (director, cast, genres, budget…)
+  - LetterboxdReviewScraper → texto rico de reseñas de usuarios
 """
 
-from .scraper import LetterboxdScraper
-from .omdb_scraper import OmdbScraper
-from .wikipedia_scraper import WikipediaScraper
+from .tmdb_client import TmdbClient
+from .scraper     import LetterboxdReviewScraper, LetterboxdScraper   # alias de compatibilidad
 
-__all__ = ["LetterboxdScraper", "OmdbScraper", "WikipediaScraper"]
+__all__ = ["TmdbClient", "LetterboxdReviewScraper", "LetterboxdScraper"]
