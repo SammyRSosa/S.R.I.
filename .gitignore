@@ -14,9 +14,10 @@ venv/
 env/
 ENV/
 
-# Environment variables
+# Environment variables & secrets
 .env
 .env.*
+*.env
 
 # NLTK downloaded data
 nltk_data/
@@ -42,3 +43,8 @@ logs/
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Datos generados (corpus e índice — demasiado grandes para el repo)
+data/documents.json
+data/index.json
+data/checkpoint.json
