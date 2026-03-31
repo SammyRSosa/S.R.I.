@@ -2,309 +2,332 @@
 crawler/scraper.py
 Módulo de Adquisición — Oscar Insight Search (SRI 2025-2026)
 
-LetterboxdReviewScraper: extrae exclusivamente el texto de las reseñas de
-usuarios de Letterboxd dado un título + año de película.
+LetterboxdReviewScraper: sesión única persistente con cloudscraper.
 
-Estrategia de localización del slug:
-  1. Construye candidatos de slug a partir del título (slugify) con y sin año.
-  2. Para cada candidato intenta GET /film/{slug}/reviews/ — si 200 OK, usa ese.
-  3. Fallback: intenta el redirect de IMDb → /imdb/{imdb_id}/ para obtener el slug.
-
-Respeta robots.txt de Letterboxd. Usa cloudscraper si está disponible para
-evadir desafíos Cloudflare (JS challenge), con fallback a requests + headers.
+Diseño clave:
+  - UN solo objeto cloudscraper. Todas las peticiones reutilizan cookies/TLS.
+  - Precalentamiento: visita la homepage para obtener cookies Cloudflare antes
+    de ir a cualquier URL de película.
+  - Endpoints validados 2025:
+      /film/{slug}/reviews/by/popularity/  → 200, ~12 reseñas/página
+      /film/{slug}/reviews/by/activity/    → 200, fallback
+  - Delay aleatorio 2–4 s entre peticiones (patrón humano).
+  - Log explícito del status_code de cada GET para trazabilidad.
 
 Uso:
     scraper = LetterboxdReviewScraper()
-    reviews = scraper.get_reviews("Oppenheimer", year=2023, max_reviews=15)
-    # ["A masterpiece of epic cinema...", ...]
+    reviews = scraper.get_reviews(imdb_id="tt15398776",
+                                  title="Oppenheimer",
+                                  year=2023,
+                                  max_reviews=10)
+    # → ["Trading your peace of mind for the power of the sun...", ...]
 """
 
 from __future__ import annotations
 
 import logging
+import random
 import re
 import time
 import unicodedata
 from typing import Optional
 from urllib.robotparser import RobotFileParser
 
+import cloudscraper
 from bs4 import BeautifulSoup
-import requests
-
-# Intentar cloudscraper (bypass de Cloudflare JS challenge)
-try:
-    import cloudscraper as _cloudscraper
-    _HAS_CLOUDSCRAPER = True
-except ImportError:
-    _HAS_CLOUDSCRAPER = False
 
 logger = logging.getLogger(__name__)
 
-# ─── Constantes ───────────────────────────────────────────────────────────────
+# ─── Config ───────────────────────────────────────────────────────────────────
 
-LETTERBOXD_BASE   = "https://letterboxd.com"
-ROBOTS_TXT_URL    = "https://letterboxd.com/robots.txt"
-ROBOTS_USER_AGENT = "OscarInsightBot/0.2 (+https://github.com/sri-2025/oscar-insight)"
+LETTERBOXD_BASE = "https://letterboxd.com"
+ROBOTS_TXT_URL  = "https://letterboxd.com/robots.txt"
+BOT_AGENT       = "OscarInsightBot/0.3 (+academia)"
 
-BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+DELAY_MIN = 2.0   # segundos delay mínimo entre peticiones
+DELAY_MAX = 4.0   # segundos delay máximo
+TIMEOUT   = 20    # timeout HTTP
+
+# Señales de Cloudflare challenge (llega con 200 pero es una barrera JS)
+CF_SIGNALS = ["Just a moment", "Checking your browser", "cf-browser-verification"]
+
+# Endpoints de reviews en orden de preferencia (validados en 2025)
+REVIEW_ENDPOINTS = [
+    "reviews/by/popularity/",
+    "reviews/by/activity/",
+]
+
+# Headers de Chrome real
+_HEADERS = {
+    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0.0.0 Safari/537.36",
+    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
     "Referer":         "https://letterboxd.com/",
-    "DNT":             "1",
     "Connection":      "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
 }
-
-REQUEST_DELAY   = 1.5    # segundos entre peticiones (educado con el servidor)
-REQUEST_TIMEOUT = 15
 
 
 class LetterboxdReviewScraper:
     """
-    Extractor de reseñas de Letterboxd.
+    Extractor de reseñas de Letterboxd con sesión única persistente.
 
-    Dado un título + año (y opcionalmente un IMDb ID), localiza la página de
-    reseñas de la película y devuelve hasta ``max_reviews`` textos de crítica.
+    La sesión se precalienta visitando la homepage para obtener las cookies
+    de Cloudflare antes de cualquier request a páginas de reviews.
 
     Args:
-        respect_robots: Si True (default), respeta robots.txt de Letterboxd.
+        respect_robots: Respetar robots.txt (default: True).
+        warmup:         Visitar homepage al iniciar para obtener cookies
+                        Cloudflare (default: True, desactivar en tests).
 
     Example::
 
         scraper = LetterboxdReviewScraper()
-        reviews = scraper.get_reviews("Oppenheimer", year=2023, max_reviews=15)
+        reviews = scraper.get_reviews(
+            imdb_id="tt15398776",
+            title="Oppenheimer",
+            year=2023,
+            max_reviews=10,
+        )
     """
 
-    def __init__(self, respect_robots: bool = True) -> None:
-        self.respect_robots = respect_robots
-        self._session = self._build_session()
+    def __init__(self, respect_robots: bool = True, warmup: bool = True) -> None:
+        # ── Sesión única — todas las peticiones comparten cookies/TLS ─────────
+        self._s = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "desktop": True},
+            delay=10,           # Tiempo máximo que cloudscraper espera para JS challenge
+        )
+        self._s.headers.update(_HEADERS)
 
-        # Cache del robot parser para no volver a descargarlo
-        self._robot_parser: Optional[RobotFileParser] = None
+        # ── robots.txt ────────────────────────────────────────────────────────
+        self._rp: Optional[RobotFileParser] = None
         if respect_robots:
             self._load_robots()
 
-    # ─── Sesión HTTP ──────────────────────────────────────────────────────────
+        # ── Precalentamiento: homepage → cookies Cloudflare ───────────────────
+        if warmup:
+            self._warmup()
 
-    @staticmethod
-    def _build_session() -> requests.Session:
-        """Crea sesión con cloudscraper si disponible, o requests + headers."""
-        if _HAS_CLOUDSCRAPER:
-            logger.debug("Usando cloudscraper para bypass Cloudflare.")
-            sess = _cloudscraper.create_scraper(
-                browser={"browser": "chrome", "platform": "windows", "desktop": True}
-            )
-        else:
-            logger.debug("cloudscraper no disponible — usando requests con browser headers.")
-            sess = requests.Session()
-        sess.headers.update(BROWSER_HEADERS)
-        return sess
-
-    # ─── Robots.txt ───────────────────────────────────────────────────────────
+    # ─── Helpers de sesión ────────────────────────────────────────────────────
 
     def _load_robots(self) -> None:
-        """Descarga y parsea robots.txt (una sola vez)."""
         try:
             rp = RobotFileParser()
             rp.set_url(ROBOTS_TXT_URL)
             rp.read()
-            self._robot_parser = rp
-            logger.debug("robots.txt cargado.")
-        except Exception as exc:
-            logger.warning("No se pudo cargar robots.txt: %s. Adoptando postura permisiva.", exc)
-            self._robot_parser = None
+            self._rp = rp
+        except Exception:
+            pass   # Postura permisiva si robots.txt no es accesible
 
     def _can_fetch(self, url: str) -> bool:
-        """True si el bot tiene permiso para acceder a la URL."""
-        if not self.respect_robots or self._robot_parser is None:
+        if self._rp is None:
             return True
-        return self._robot_parser.can_fetch(ROBOTS_USER_AGENT, url)
+        return self._rp.can_fetch(BOT_AGENT, url)
 
-    # ─── Slug construction ────────────────────────────────────────────────────
+    def _sleep(self, extra: float = 0.0) -> None:
+        """Delay aleatorio entre DELAY_MIN y DELAY_MAX segundos."""
+        time.sleep(random.uniform(DELAY_MIN, DELAY_MAX) + extra)
 
-    @staticmethod
-    def _slugify(text: str) -> str:
+    def _warmup(self) -> None:
         """
-        Convierte un título en el slug de Letterboxd.
-
-        Letterboxd usa slugs en minúsculas con guiones donde los espacios,
-        sin caracteres especiales. Números y letras permitidos.
+        Visita la homepage de Letterboxd para obtener las cookies de Cloudflare.
+        Sin esto, la primera petición a una página de película puede devolver 403.
         """
-        # Normalizar acentos (NFD → ASCII)
-        nfkd = unicodedata.normalize("NFKD", text)
-        ascii_text = nfkd.encode("ascii", "ignore").decode("ascii")
-        lowered = ascii_text.lower()
-        # Reemplazar caracteres no alfanuméricos por guiones
-        slug = re.sub(r"[^a-z0-9]+", "-", lowered)
-        slug = slug.strip("-")
-        return slug
+        logger.info("Precalentando sesión Letterboxd (homepage)...")
+        self._get_html(LETTERBOXD_BASE + "/", label="warmup")
+        self._sleep()
 
-    def _candidate_slugs(self, title: str, year: Optional[int]) -> list[str]:
-        """
-        Genera candidatos de slug para la película, en orden de probabilidad.
+    # ─── GET central ──────────────────────────────────────────────────────────
 
-        Letterboxd a veces añade el año al slug para desambiguar.
-        """
-        base = self._slugify(title)
-        candidates = [base]
-        if year:
-            candidates.append(f"{base}-{year}")
-            candidates.append(f"{base}-{year}-film")
-        candidates.append(f"{base}-film")
-        return candidates
-
-    # ─── HTTP helper ──────────────────────────────────────────────────────────
-
-    def _fetch(self, url: str) -> Optional[BeautifulSoup]:
-        """
-        GET con delay de cortesía. Retorna BeautifulSoup o None si falla.
-        No lanza excepciones — devuelve None en caso de error.
-        """
-        if not self._can_fetch(url):
-            logger.debug("robots.txt bloqueó: %s", url)
-            return None
-        try:
-            time.sleep(REQUEST_DELAY)
-            resp = self._session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            return BeautifulSoup(resp.text, "lxml")
-        except Exception as exc:
-            logger.debug("Error fetching %s: %s", url, exc)
-            return None
-
-    # ─── Localización del reviews URL ─────────────────────────────────────────
-
-    def _find_reviews_url(
+    def _get_html(
         self,
-        title: str,
-        year: Optional[int],
-        imdb_id: Optional[str] = None,
-    ) -> Optional[str]:
+        url: str,
+        label: str = "",
+        allow_redirects: bool = True,
+        retries: int = 2,
+    ) -> Optional[tuple[str, str]]:
         """
-        Localiza la URL de reviews de Letterboxd para la película.
+        GET HTTP con la sesión única. Logea siempre el status_code.
 
-        Estrategia:
-          1. Probar slugs construidos desde el título (más rápido, sin redirect).
-          2. Si falla y hay imdb_id, usar el redirect /imdb/{id}/ para obtener slug.
+        Args:
+            url:             URL a obtener.
+            label:           Etiqueta para el log (facilita debug).
+            allow_redirects: Seguir redirects (default: True).
+            retries:         Reintentos en caso de error (default: 2).
 
         Returns:
-            URL de reviews (str) o None si no se encuentra.
+            Tupla ``(html: str, final_url: str)`` o ``None`` si falla.
         """
-        # Estrategia 1: slug por título
-        for slug in self._candidate_slugs(title, year):
-            reviews_url = f"{LETTERBOXD_BASE}/film/{slug}/reviews/"
-            if not self._can_fetch(reviews_url):
-                continue
-            # Prueba silenciosa: si devuelve soup válida, la usamos
-            time.sleep(REQUEST_DELAY)
-            try:
-                resp = self._session.get(reviews_url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-                if resp.status_code == 200 and "/film/" in resp.url:
-                    logger.debug("Slug encontrado por título: %s", slug)
-                    return resp.url  # URL final tras posibles redirects
-            except Exception:
-                continue
+        if not self._can_fetch(url):
+            logger.debug("[%s] robots.txt bloquea: %s", label, url)
+            return None
 
-        # Estrategia 2: redirect desde IMDb ID
-        if imdb_id:
-            imdb_url = f"{LETTERBOXD_BASE}/imdb/{imdb_id}/"
-            if self._can_fetch(imdb_url):
-                try:
-                    time.sleep(REQUEST_DELAY)
-                    resp = self._session.get(imdb_url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-                    if resp.status_code == 200 and "/film/" in resp.url:
-                        # Tenemos la URL del film, construir la de reviews
-                        film_url = resp.url.rstrip("/") + "/"
-                        reviews_url = film_url + "reviews/"
-                        logger.debug("Slug obtenido vía IMDb redirect: %s", reviews_url)
-                        return reviews_url
-                except Exception as exc:
-                    logger.debug("IMDb redirect falló: %s", exc)
+        for attempt in range(retries + 1):
+            if attempt > 0:
+                extra_wait = attempt * 3.0
+                logger.debug("[%s] Reintento %d — esperando %.0fs", label, attempt, extra_wait)
+                time.sleep(extra_wait)
+            else:
+                self._sleep()
+
+            try:
+                resp = self._s.get(url, timeout=TIMEOUT, allow_redirects=allow_redirects)
+
+                # Log explícito de status para depuración
+                logger.info("[%s] GET %s -> %d (final: %s)",
+                            label or "req", url, resp.status_code, resp.url)
+
+                if resp.status_code == 404:
+                    return None
+                if resp.status_code == 403:
+                    logger.warning("[%s] 403 Forbidden en %s", label, url)
+                    return None
+                if resp.status_code == 429:
+                    logger.warning("[%s] 429 Rate Limited — esperando 45s", label)
+                    time.sleep(45)
+                    continue
+                if resp.status_code != 200:
+                    logger.warning("[%s] HTTP %d en %s", label, resp.status_code, url)
+                    continue
+
+                # Detectar Cloudflare challenge disfrazado de 200
+                if any(sig in resp.text[:2000] for sig in CF_SIGNALS):
+                    logger.warning("[%s] Cloudflare challenge detectado (intento %d)", label, attempt + 1)
+                    time.sleep(6 * (attempt + 1))
+                    continue
+
+                return (resp.text, resp.url)
+
+            except Exception as exc:
+                logger.warning("[%s] Excepción en intento %d: %s", label, attempt + 1, exc)
 
         return None
 
-    # ─── Extracción de reseñas ────────────────────────────────────────────────
+    # ─── Resolución del slug de Letterboxd ────────────────────────────────────
 
-    def _parse_reviews(self, soup: BeautifulSoup, max_reviews: int) -> list[str]:
+    @staticmethod
+    def _slugify(text: str) -> str:
+        """Convierte texto en slug Letterboxd (ascii lowercase, guiones)."""
+        nfkd = unicodedata.normalize("NFKD", text)
+        ascii_t = nfkd.encode("ascii", "ignore").decode("ascii")
+        slug = re.sub(r"[^a-z0-9]+", "-", ascii_t.lower())
+        return slug.strip("-")
+
+    def _resolve_film_url(
+        self,
+        imdb_id: Optional[str],
+        title: str,
+        year: Optional[int],
+    ) -> Optional[str]:
         """
-        Extrae el texto de las reseñas de una página de reviews de Letterboxd.
+        Resuelve la URL del film en Letterboxd.
 
-        Letterboxd renderiza las reseñas en elementos <div class="body-text">
-        dentro de <li class="film-detail">.
+        Estrategia 1 — IMDb redirect (más precisa):
+            GET /imdb/{imdb_id}/ → 302 → /film/{slug}/
+
+        Estrategia 2 — Heurística (fallback):
+            Prueba /film/{slug}-{year}/ y /film/{slug}/
+
+        Returns:
+            URL del film con / final, ej: "https://letterboxd.com/film/oppenheimer-2023/"
+            o None si no se localiza.
+        """
+        # ── Estrategia 1: redirect por IMDb ID ────────────────────────────────
+        if imdb_id:
+            result = self._get_html(
+                f"{LETTERBOXD_BASE}/imdb/{imdb_id}/",
+                label=f"imdb-redirect:{imdb_id}",
+            )
+            if result:
+                _, final_url = result
+                if "/film/" in final_url:
+                    film_url = final_url.rstrip("/") + "/"
+                    logger.info("Slug via IMDb redirect: %s", film_url)
+                    return film_url
+
+        # ── Estrategia 2: slug heurístico ─────────────────────────────────────
+        base = self._slugify(title)
+        candidates = []
+        if year:
+            candidates.append(f"{base}-{year}")
+        candidates.append(base)
+
+        for slug in candidates:
+            url = f"{LETTERBOXD_BASE}/film/{slug}/"
+            result = self._get_html(url, label=f"slug:{slug}")
+            if result:
+                _, final_url = result
+                if "/film/" in final_url:
+                    film_url = final_url.rstrip("/") + "/"
+                    logger.info("Slug via heurística: %s", film_url)
+                    return film_url
+
+        return None
+
+    # ─── Parseo de reseñas ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_reviews(soup: BeautifulSoup, max_n: int) -> list[str]:
+        """
+        Extrae texto de reseñas del HTML de Letterboxd.
+
+        Selector validado 2025:
+            <div class="body-text ...">
+                <p>Texto de la reseña aquí.</p>
+            </div>
         """
         reviews: list[str] = []
 
-        # Método principal: div.body-text (versión moderna de Letterboxd)
-        for body in soup.find_all("div", class_="body-text", limit=max_reviews * 2):
-            text = body.get_text(separator=" ", strip=True)
-            # Filtrar reseñas demasiado cortas (menos de 50 chars)
-            if text and len(text) >= 50:
+        for div in soup.find_all("div", class_=lambda c: c and "body-text" in c):
+            # Priorizar párrafos internos; fallback a texto del div completo
+            paras = div.find_all("p")
+            text = (
+                " ".join(p.get_text(separator=" ", strip=True) for p in paras)
+                if paras
+                else div.get_text(separator=" ", strip=True)
+            )
+            text = re.sub(r"\s+", " ", text).strip()
+            if len(text) >= 50 and text not in reviews:
                 reviews.append(text)
-            if len(reviews) >= max_reviews:
+            if len(reviews) >= max_n:
                 break
 
-        # Fallback: buscar párrafos en li.film-detail
-        if not reviews:
-            for block in soup.find_all("li", class_="film-detail", limit=max_reviews * 2):
-                paragraphs = block.find_all("p")
-                text = " ".join(p.get_text(strip=True) for p in paragraphs).strip()
-                if text and len(text) >= 50:
-                    reviews.append(text)
-                if len(reviews) >= max_reviews:
-                    break
+        return reviews
 
-        # Fallback 2: cualquier .review-body o .review .body
-        if not reviews:
-            for el in soup.find_all(class_=re.compile(r"review.*body|body.*review"), limit=max_reviews * 2):
-                text = el.get_text(separator=" ", strip=True)
-                if text and len(text) >= 50:
-                    reviews.append(text)
-                if len(reviews) >= max_reviews:
-                    break
+    # ─── Extracción de reseñas ────────────────────────────────────────────────
 
-        return reviews[:max_reviews]
-
-    # ─── Paginación ───────────────────────────────────────────────────────────
-
-    def _get_reviews_from_url(self, reviews_url: str, max_reviews: int) -> list[str]:
+    def _fetch_reviews(self, film_url: str, max_reviews: int) -> list[str]:
         """
-        Extrae reseñas de una URL de reviews, con paginación si hace falta.
-
-        Letterboxd pagina las reviews como /reviews/page/2/, etc.
+        Prueba los endpoints de reviews en orden y retorna los textos extraídos.
+        Pagina hasta 2 páginas si necesita más reseñas.
         """
-        all_reviews: list[str] = []
-        current_url = reviews_url
-        page = 1
-        max_pages = 3  # Máximo 3 páginas (≈60 reviews) para ser educados
+        for endpoint in REVIEW_ENDPOINTS:
+            url = film_url + endpoint
+            result = self._get_html(url, label=f"reviews:{endpoint.strip('/')}")
+            if not result:
+                continue
 
-        while current_url and len(all_reviews) < max_reviews and page <= max_pages:
-            soup = self._fetch(current_url)
-            if soup is None:
-                break
+            html, _ = result
+            soup = BeautifulSoup(html, "lxml")
+            reviews = self._parse_reviews(soup, max_reviews)
 
-            batch = self._parse_reviews(soup, max_reviews - len(all_reviews))
-            all_reviews.extend(batch)
+            if reviews:
+                logger.info("  %d reseñas en /%s", len(reviews), endpoint)
 
-            if len(all_reviews) >= max_reviews or not batch:
-                break
+                # Página 2 si necesitamos más
+                if len(reviews) < max_reviews:
+                    result2 = self._get_html(url + "page/2/", label="reviews:p2")
+                    if result2:
+                        soup2 = BeautifulSoup(result2[0], "lxml")
+                        more = self._parse_reviews(soup2, max_reviews - len(reviews))
+                        reviews.extend(more)
 
-            # Buscar enlace a página siguiente
-            next_link = soup.find("a", class_=re.compile(r"next"))
-            if next_link and next_link.get("href"):
-                href = next_link["href"]
-                current_url = href if href.startswith("http") else LETTERBOXD_BASE + href
-                page += 1
-            else:
-                break
+                return reviews[:max_reviews]
 
-        return all_reviews[:max_reviews]
+        return []
 
     # ─── API pública ──────────────────────────────────────────────────────────
 
@@ -313,68 +336,61 @@ class LetterboxdReviewScraper:
         title: str,
         year: Optional[int] = None,
         imdb_id: Optional[str] = None,
-        max_reviews: int = 15,
+        max_reviews: int = 10,
     ) -> list[str]:
         """
-        Obtiene hasta ``max_reviews`` reseñas de usuarios de Letterboxd.
+        Obtiene hasta ``max_reviews`` reseñas de Letterboxd para una película.
 
         Args:
-            title:       Título de la película en inglés.
-            year:        Año de estreno (mejora la localización del slug).
-            imdb_id:     IMDb ID (fallback para localizar el slug vía redirect).
-            max_reviews: Número máximo de reseñas a retornar (default: 15).
+            title:       Título en inglés.
+            year:        Año de estreno.
+            imdb_id:     IMDb ID (tt1234567) — muy recomendado para precisión.
+            max_reviews: Máx. reseñas a devolver (default: 10).
 
         Returns:
-            Lista de strings con el texto de cada reseña.
-            Lista vacía si no se encuentran reseñas o el acceso está bloqueado.
+            Lista de strings. Vacía si no se encuentra o Letterboxd bloquea.
         """
-        logger.info(
-            "Buscando reviews de Letterboxd: '%s' (%s) | max=%d",
-            title, year or "?", max_reviews,
-        )
+        logger.info("=== Letterboxd: '%s' (%s) | imdb=%s ===",
+                    title, year or "?", imdb_id or "N/A")
 
-        reviews_url = self._find_reviews_url(title, year=year, imdb_id=imdb_id)
-        if not reviews_url:
-            logger.debug("No se encontró URL de reviews para: '%s' (%s)", title, year)
+        film_url = self._resolve_film_url(imdb_id=imdb_id, title=title, year=year)
+        if not film_url:
+            logger.warning("  -> No localizado en Letterboxd")
             return []
 
-        reviews = self._get_reviews_from_url(reviews_url, max_reviews)
-        logger.info(
-            "Reviews obtenidas: %d | '%s' | URL: %s",
-            len(reviews), title, reviews_url,
-        )
+        reviews = self._fetch_reviews(film_url, max_reviews)
+        logger.info("  -> Total reseñas obtenidas: %d", len(reviews))
         return reviews
 
 
-# ─── Compatibilidad backward: alias ───────────────────────────────────────────
-# El LetterboxdScraper original sigue disponible para no romper imports existentes.
+# ─── Alias backward ───────────────────────────────────────────────────────────
 
 class LetterboxdScraper(LetterboxdReviewScraper):
-    """Alias de LetterboxdReviewScraper para compatibilidad con código anterior."""
+    """Alias de compatibilidad con código anterior."""
 
     def scrape_film(self, url: str) -> dict:
-        """Stub de compatibilidad — retorna dict vacío con reviews."""
         from urllib.parse import urlparse
         parts = urlparse(url).path.strip("/").split("/")
-        # /film/{slug}
         title = parts[1].replace("-", " ").title() if len(parts) > 1 else url
-        reviews = self.get_reviews(title, max_reviews=5)
         return {
-            "title":    title,
-            "year":     "",
-            "synopsis": "",
-            "reviews":  reviews,
+            "title": title, "year": "", "synopsis": "",
+            "reviews": self.get_reviews(title, max_reviews=5),
             "source_url": url,
         }
 
 
-# ─── Uso de ejemplo ───────────────────────────────────────────────────────────
+# ─── Prueba directa ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import json
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
 
     scraper = LetterboxdReviewScraper()
-    reviews = scraper.get_reviews("Oppenheimer", year=2023, imdb_id="tt15398776", max_reviews=10)
-    print(f"Reviews obtenidas: {len(reviews)}")
+    reviews = scraper.get_reviews(
+        title="Oppenheimer", year=2023,
+        imdb_id="tt15398776", max_reviews=5,
+    )
+    print(f"\nReseñas obtenidas: {len(reviews)}")
     for i, r in enumerate(reviews, 1):
-        print(f"\n[{i}] {r[:200]}...")
+        print(f"\n[{i}] {r[:250]}")
