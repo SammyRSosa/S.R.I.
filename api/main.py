@@ -1,182 +1,150 @@
 """
 api/main.py
-Módulo de Recuperación / RAG — Oscar Insight Search (SRI 2025-2026)
+Módulo de Recuperación Híbrido — Oscar Insight Search (Corte 2)
 
-Esqueleto FastAPI que expondrá el motor de búsqueda basado en el
-Modelo Booleano Extendido (Corte 2+).
-
-Endpoints implementados:
-    GET  /          → Health check
-    POST /search    → Placeholder: búsqueda por consulta booleana (Corte 2)
-    POST /index     → Placeholder: indexación de nueva película (Corte 2)
+Implementa el motor de búsqueda basado en el Modelo Booleano Extendido (p-norm)
+y Búsqueda Semántica (embeddings FAISS).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
+
+from database.store import DocumentStore
+from indexer.inverted_index import InvertedIndex
+from indexer.ebm import ExtendedBooleanModel
+from database.vector_store import VectorStore
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ─── Inicialización de Motores ──────────────────────────────────────────────────
+
+# Cargamos los recursos una sola vez al inicio del servidor
+store = DocumentStore()
+idx = InvertedIndex()
+
+# Reconstruir índice base (frecuencias) en memoria
+if store.documents:
+    for doc_id, data in store.documents.items():
+        idx.add_film(doc_id, data)
+
+# Cargar motores de ranking avanzado
+ebm = ExtendedBooleanModel(store, idx, p=2.0)
+v_store = VectorStore()
+
 # ─── Aplicación ───────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="Oscar Insight Search",
+    title="Oscar Insight Search (Corte 2)",
     description=(
-        "Sistema de Recuperación de Información sobre Cine y Premios Oscar. "
-        "Modelo: Booleano Extendido (Baeza-Yates & Ribeiro-Neto, 2011). "
-        "Dominio: Letterboxd + IMDb."
+        "Sistema de Recuperación Híbrido: Modelo Booleano Extendido + Semántica Vectorial."
     ),
-    version="0.1.0",
-    contact={
-        "name": "SRI 2025-2026 Team",
-        "url": "https://github.com/sri-2025/oscar-insight",
-    },
-    license_info={"name": "MIT"},
+    version="0.2.0",
 )
 
 
 # ─── Schemas Pydantic ─────────────────────────────────────────────────────────
 
 class SearchRequest(BaseModel):
-    """Parámetros de una consulta de búsqueda."""
-
-    query: str = Field(
-        ...,
-        min_length=1,
-        max_length=500,
-        description="Consulta booleana o de texto libre. Ej: 'Oscar AND director'",
-        examples=["Best Picture 2024", "Oppenheimer AND director"],
-    )
-    top_k: int = Field(
-        default=10,
-        ge=1,
-        le=100,
-        description="Número máximo de resultados a retornar.",
-    )
-    year_filter: Optional[int] = Field(
-        default=None,
-        ge=1927,
-        description="Filtro opcional: sólo películas de este año.",
-    )
-
+    query: str = Field(..., min_length=1)
+    top_k: int = Field(default=10, ge=1, le=50)
+    p: float = Field(default=2.0, ge=1.0, description="Exponente para la p-norma del EBM.")
+    hybrid: bool = Field(default=True, description="Si es True, combina Booleano con Semántico.")
 
 class SearchResult(BaseModel):
-    """Un resultado individual de búsqueda."""
-
-    doc_id: int = Field(..., description="ID interno del documento.")
-    title: str = Field(..., description="Título de la película.")
-    year: str = Field(..., description="Año de estreno.")
-    score: float = Field(..., description="Puntuación de relevancia [0, 1].")
-    snippet: str = Field(..., description="Fragmento de texto relevante.")
-
+    doc_id: int
+    title: str
+    year: str
+    score: float
+    ebm_score: float
+    vector_score: float
+    snippet: str
 
 class SearchResponse(BaseModel):
-    """Respuesta completa de una consulta de búsqueda."""
-
     query: str
     total_results: int
-    results: list[SearchResult]
-
-
-class IndexRequest(BaseModel):
-    """Solicitud para indexar una nueva película."""
-
-    url: str = Field(
-        ...,
-        description="URL de la película en Letterboxd.",
-        examples=["https://letterboxd.com/film/oppenheimer-2023/"],
-    )
-    doc_id: Optional[int] = Field(
-        default=None,
-        description="ID manual (opcional). Si no se provee, se asigna automáticamente.",
-    )
-
+    results: List[SearchResult]
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
-@app.get(
-    "/",
-    summary="Health Check",
-    tags=["Sistema"],
-    response_description="Estado del sistema y versión de la API.",
-)
-async def root() -> dict:
-    """
-    Verifica que el servicio está en funcionamiento.
-
-    Returns:
-        JSON con estado, nombre del sistema y versión.
-    """
+@app.get("/")
+async def root():
     return {
         "status": "ok",
-        "service": "Oscar Insight Search",
-        "version": "0.1.0",
-        "model": "Extended Boolean Model",
-        "corte": 1,
-        "message": "API operativa. Motor de búsqueda en construcción (Corte 2).",
+        "model": "Hybrid (EBM + Vector)",
+        "docs": len(store.documents),
+        "vocab": idx.vocabulary_size
     }
 
-
-@app.post(
-    "/search",
-    response_model=SearchResponse,
-    summary="Búsqueda de Películas",
-    tags=["Recuperación"],
-    status_code=status.HTTP_200_OK,
-)
-async def search(request: SearchRequest) -> SearchResponse:
+@app.post("/search", response_model=SearchResponse)
+async def search(request: SearchRequest):
     """
-    **[PLACEHOLDER — Corte 2]** Ejecuta una consulta sobre el índice invertido
-    usando el Modelo Booleano Extendido.
-
-    En Corte 2 este endpoint:
-    1. Tokenizará y normalizará la consulta (`InvertedIndex._tokenize`).
-    2. Recuperará posting lists para cada término.
-    3. Calculará similitud EBM con distancias euclidianas ponderadas por tf-idf.
-    4. Retornará los top-k documentos ordenados por score descendente.
-
-    Por ahora retorna un 501 informativo.
+    Ejecuta una búsqueda híbrida:
+    1. Recupera relevancia por Modelo Booleano Extendido (p-norm).
+    2. Recupera relevancia por Similitud de Coseno (FAISS).
+    3. Combina y ordena por Score Híbrido.
     """
-    logger.info("Query recibida: '%s' | top_k=%d", request.query, request.top_k)
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail={
-            "message": "Motor de búsqueda EBM pendiente de implementación (Corte 2).",
-            "query": request.query,
-            "hint": "El InvertedIndex base ya está disponible en indexer/inverted_index.py",
-        },
-    )
-
-
-@app.post(
-    "/index",
-    summary="Indexar Película",
-    tags=["Adquisición"],
-    status_code=status.HTTP_202_ACCEPTED,
-)
-async def index_film(request: IndexRequest) -> dict:
-    """
-    **[PLACEHOLDER — Corte 2]** Ordena la adquisición e indexación de una película
-    desde Letterboxd.
-
-    En Corte 2 este endpoint:
-    1. Llamará a `LetterboxdScraper.scrape_film(url)`.
-    2. Pasará el resultado a `InvertedIndex.add_film(doc_id, film_data)`.
-    3. Persistirá el índice actualizado en la base de datos.
-
-    Por ahora retorna un 501 informativo.
-    """
-    logger.info("Solicitud de indexación: %s", request.url)
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail={
-            "message": "Endpoint de indexación pendiente (Corte 2).",
-            "url": request.url,
-            "hint": "Usa crawler/scraper.py e indexer/inverted_index.py directamente.",
-        },
+    query = request.query
+    ebm.p = request.p
+    
+    # 1. Búsqueda EBM (Booleana Suave)
+    # Por defecto usamos OR para lenguaje natural, AND si queremos rigurosidad.
+    ebm_results = ebm.search(query, op="OR")
+    ebm_map = {doc_id: score for doc_id, score in ebm_results}
+    
+    # 2. Búsqueda Vectorial (Semántica)
+    vector_results = v_store.search(query, top_k=50)
+    vector_map = {doc_id: score for doc_id, score in vector_results}
+    
+    # 3. Combinación Híbrida
+    all_doc_ids = set(ebm_map.keys()) | set(vector_map.keys())
+    combined = []
+    
+    for doc_id in all_doc_ids:
+        s_ebm = ebm_map.get(doc_id, 0.0)
+        s_vec = vector_map.get(doc_id, 0.0)
+        
+        # Ponderación 50/50 por defecto
+        # Evitamos que documentos sin nexo textual pero con cercanía vectorial dominen si s_ebm es 0
+        h_score = (s_ebm * 0.6) + (s_vec * 0.4) 
+        
+        film = store.get_film(doc_id)
+        if not film: continue
+        
+        # Generar fragmento relevante (snippet) del rich_text
+        text = film.get("rich_text", "") or film.get("synopsis", "")
+        # Heurística simple: buscar primera aparición de algún término de la consulta
+        tokens = idx._tokenize(query)
+        snippet = text[:200] + "..."
+        for t in tokens:
+            idx_t = text.lower().find(t)
+            if idx_t != -1:
+                start = max(0, idx_t - 40)
+                end = min(len(text), idx_t + 160)
+                snippet = "..." + text[start:end] + "..."
+                break
+        
+        combined.append(SearchResult(
+            doc_id=doc_id,
+            title=film.get("title", "Unknown"),
+            year=str(film.get("year", "N/A")),
+            score=round(h_score, 4),
+            ebm_score=round(s_ebm, 4),
+            vector_score=round(s_vec, 4),
+            snippet=snippet
+        ))
+        
+    # Ordenar por score combinado descendente
+    combined.sort(key=lambda x: x.score, reverse=True)
+    results = combined[:request.top_k]
+    
+    return SearchResponse(
+        query=query,
+        total_results=len(combined),
+        results=results
     )
