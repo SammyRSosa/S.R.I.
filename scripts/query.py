@@ -71,8 +71,12 @@ Ejemplos:
             print("   → Sin resultados.\n")
             continue
 
-        print(f"   → {len(postings)} documento(s) encontrado(s):")
-        for doc_id, tf in postings:
+        # Ordenar por frecuencia (tf) de mayor a menor y limitar al top 10
+        postings.sort(key=lambda x: x[1], reverse=True)
+        top_n = min(10, len(postings))
+        
+        print(f"   → {len(postings)} documento(s) en total, mostrando los {top_n} más relevantes:")
+        for doc_id, tf in postings[:top_n]:
             film = store.get_film(doc_id)
             title = film.get("title", "?") if film else "?"
             year  = film.get("year",  "?") if film else "?"
