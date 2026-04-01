@@ -1,8 +1,8 @@
 # ─── Adquisición ─────────────────────────────────────────────────────────────
 beautifulsoup4>=4.12.3
-requests>=2.31.0
+requests>=2.31.0        # TMDB API client
 lxml>=5.3.0
-cloudscraper>=1.2.71
+curl-cffi>=0.7.0        # TLS fingerprinting (Cloudflare bypass para Letterboxd)
 
 # ─── NLP / Indexación ─────────────────────────────────────────────────────────
 nltk>=3.8.1
