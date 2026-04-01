@@ -7,5 +7,6 @@ Persistencia JSON de documentos (películas) e índice invertido.
 
 from .store      import DocumentStore
 from .checkpoint import Checkpoint
+from .vector_store import VectorStore
 
-__all__ = ["DocumentStore", "Checkpoint"]
+__all__ = ["DocumentStore", "Checkpoint", "VectorStore"]

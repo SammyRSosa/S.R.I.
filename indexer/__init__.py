@@ -6,5 +6,6 @@ Exporta la clase InvertedIndex para uso externo.
 """
 
 from .inverted_index import InvertedIndex
+from .ebm            import ExtendedBooleanModel
 
-__all__ = ["InvertedIndex"]
+__all__ = ["InvertedIndex", "ExtendedBooleanModel"]
