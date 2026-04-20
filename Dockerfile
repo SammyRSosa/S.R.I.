@@ -19,7 +19,7 @@ RUN pip install --upgrade pip && \
     pip install --prefix=/install --no-cache-dir -r requirements.txt
 
 # Descargar recursos NLTK en tiempo de build (evita descarga en runtime)
-RUN python -c "\
+RUN PYTHONPATH=/install/lib/python3.11/site-packages python -c "\
 import nltk; \
 nltk.download('punkt',     download_dir='/install/nltk_data'); \
 nltk.download('punkt_tab', download_dir='/install/nltk_data'); \
