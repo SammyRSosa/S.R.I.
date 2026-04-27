@@ -1,17 +1,10 @@
-"""
-api/main.py
-Módulo de Recuperación Híbrido — Oscar Insight Search (Corte 2)
-
-Implementa el motor de búsqueda basado en el Modelo Booleano Extendido (p-norm)
-y Búsqueda Semántica (embeddings FAISS).
-"""
-
-from __future__ import annotations
-
 import logging
 from typing import Optional, List
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from database.store import DocumentStore
@@ -23,40 +16,52 @@ from database.vector_store import VectorStore
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ─── Configuración de Rutas ──────────────────────────────────────────────────
+BASE_DIR = Path(__file__).parent.parent
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+
 # ─── Inicialización de Motores ──────────────────────────────────────────────────
 
-# Cargamos los recursos una sola vez al inicio del servidor
+# Cargamos los recursos una sola vez al inicio del servidor para eficiencia
 store = DocumentStore()
 idx = InvertedIndex()
 
-# Reconstruir índice base (frecuencias) en memoria
+# Reconstruir índice base (frecuencias) en memoria si hay documentos
 if store.documents:
+    logger.info("Cargando %d documentos en el índice de memoria...", len(store.documents))
     for doc_id, data in store.documents.items():
         idx.add_film(doc_id, data)
 
-# Cargar motores de ranking avanzado
+# Cargar motores de ranking avanzado (EBM y FAISS)
 ebm = ExtendedBooleanModel(store, idx, p=2.0)
 v_store = VectorStore()
 
-# ─── Aplicación ───────────────────────────────────────────────────────────────
+# ─── Aplicación FastAPI ───────────────────────────────────────────────────────
 app = FastAPI(
-    title="Oscar Insight Search (Corte 2)",
+    title="Oscar Insight Search",
     description=(
-        "Sistema de Recuperación Híbrido: Modelo Booleano Extendido + Semántica Vectorial."
+        "Sistema de Recuperación Híbrido: Modelo Booleano Extendido + Semántica Vectorial. "
+        "Proyecto de Sistemas de Recuperación de Información (SRI) 2025-2026."
     ),
-    version="0.2.0",
+    version="0.3.0",
 )
+
+# Configuración de templates
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 # ─── Schemas Pydantic ─────────────────────────────────────────────────────────
 
 class SearchRequest(BaseModel):
-    query: str = Field(..., min_length=1)
-    top_k: int = Field(default=10, ge=1, le=50)
-    p: float = Field(default=2.0, ge=1.0, description="Exponente para la p-norma del EBM.")
-    hybrid: bool = Field(default=True, description="Si es True, combina Booleano con Semántico.")
+    """Parámetros de entrada para la búsqueda híbrida."""
+    query: str = Field(..., min_length=1, description="Texto de consulta en lenguaje natural.")
+    top_k: int = Field(default=10, ge=1, le=50, description="Número de resultados a devolver.")
+    p: float = Field(default=2.0, ge=1.0, description="Exponente para la p-norma del modelo EBM.")
+    ebm_weight: float = Field(default=0.6, ge=0.0, le=1.0, description="Peso del score booleano (0-1).")
+    vector_weight: float = Field(default=0.4, ge=0.0, le=1.0, description="Peso del score semántico (0-1).")
 
 class SearchResult(BaseModel):
+    """Representación de un resultado individual de búsqueda."""
     doc_id: int
     title: str
     year: str
@@ -66,42 +71,56 @@ class SearchResult(BaseModel):
     snippet: str
 
 class SearchResponse(BaseModel):
+    """Estructura de respuesta de la API."""
     query: str
     total_results: int
     results: List[SearchResult]
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
-@app.get("/")
-async def root():
+@app.get("/", response_class=HTMLResponse, summary="Interfaz Visual", tags=["UI"])
+async def read_root(request: Request):
+    """
+    Sirve la página web principal del buscador.
+    """
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.get("/health", summary="Estado del Sistema", tags=["Sistema"])
+async def health_check():
+    """
+    Verifica que los modelos e índices están cargados correctamente.
+    """
     return {
         "status": "ok",
         "model": "Hybrid (EBM + Vector)",
-        "docs": len(store.documents),
-        "vocab": idx.vocabulary_size
+        "docs_loaded": len(store.documents),
+        "vocab_size": idx.vocabulary_size,
+        "vector_index_size": v_store.index.ntotal if v_store.index else 0
     }
 
-@app.post("/search", response_model=SearchResponse)
+@app.post("/search", response_model=SearchResponse, summary="Búsqueda Híbrida", tags=["Recuperación"])
 async def search(request: SearchRequest):
     """
-    Ejecuta una búsqueda híbrida:
-    1. Recupera relevancia por Modelo Booleano Extendido (p-norm).
-    2. Recupera relevancia por Similitud de Coseno (FAISS).
-    3. Combina y ordena por Score Híbrido.
+    Realiza una búsqueda combinando el Modelo Booleano Extendido y Búsqueda Vectorial.
+    
+    Proceso:
+    1. Tokenización y normalización de la query.
+    2. Cálculo de similitud p-norma (EBM).
+    3. Cálculo de similitud de coseno sobre embeddings FAISS.
+    4. Fusión de resultados mediante combinación lineal ponderada.
     """
     query = request.query
     ebm.p = request.p
     
-    # 1. Búsqueda EBM (Booleana Suave)
-    # Por defecto usamos OR para lenguaje natural, AND si queremos rigurosidad.
+    # 1. Búsqueda EBM (Lógica Booleana Suave)
     ebm_results = ebm.search(query, op="OR")
     ebm_map = {doc_id: score for doc_id, score in ebm_results}
     
-    # 2. Búsqueda Vectorial (Semántica)
+    # 2. Búsqueda Vectorial (Semántica profunda)
     vector_results = v_store.search(query, top_k=50)
     vector_map = {doc_id: score for doc_id, score in vector_results}
     
-    # 3. Combinación Híbrida
+    # 3. Combinación Híbrida y Generación de Snippets
     all_doc_ids = set(ebm_map.keys()) | set(vector_map.keys())
     combined = []
     
@@ -109,23 +128,21 @@ async def search(request: SearchRequest):
         s_ebm = ebm_map.get(doc_id, 0.0)
         s_vec = vector_map.get(doc_id, 0.0)
         
-        # Ponderación 50/50 por defecto
-        # Evitamos que documentos sin nexo textual pero con cercanía vectorial dominen si s_ebm es 0
-        h_score = (s_ebm * 0.6) + (s_vec * 0.4) 
+        # Combinación lineal con pesos configurables
+        h_score = (s_ebm * request.ebm_weight) + (s_vec * request.vector_weight) 
         
         film = store.get_film(doc_id)
         if not film: continue
         
-        # Generar fragmento relevante (snippet) del rich_text
+        # Generación de Snippet inteligente (contextual a la query)
         text = film.get("rich_text", "") or film.get("synopsis", "")
-        # Heurística simple: buscar primera aparición de algún término de la consulta
         tokens = idx._tokenize(query)
         snippet = text[:200] + "..."
         for t in tokens:
             idx_t = text.lower().find(t)
             if idx_t != -1:
-                start = max(0, idx_t - 40)
-                end = min(len(text), idx_t + 160)
+                start = max(0, idx_t - 60)
+                end = min(len(text), idx_t + 140)
                 snippet = "..." + text[start:end] + "..."
                 break
         
@@ -139,9 +156,11 @@ async def search(request: SearchRequest):
             snippet=snippet
         ))
         
-    # Ordenar por score combinado descendente
+    # Ordenar por score combinado y limitar a top_k
     combined.sort(key=lambda x: x.score, reverse=True)
     results = combined[:request.top_k]
+    
+    logger.info("Search: '%s' -> %d results.", query, len(combined))
     
     return SearchResponse(
         query=query,

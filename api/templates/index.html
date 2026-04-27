@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oscar Insight Search | SRI 2025</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #e50914;
+            --bg: #0f172a;
+            --card: #1e293b;
+            --text: #f8fafc;
+            --text-dim: #94a3b8;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        header {
+            width: 100%;
+            padding: 2rem 0;
+            text-align: center;
+            background: linear-gradient(to bottom, #1e293b, #0f172a);
+        }
+
+        h1 {
+            font-weight: 800;
+            font-size: 2.5rem;
+            margin: 0;
+            background: linear-gradient(45deg, #f59e0b, #e50914);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .search-container {
+            width: 90%;
+            max-width: 800px;
+            margin-top: -1.5rem;
+            z-index: 10;
+        }
+
+        .search-box {
+            background: var(--card);
+            padding: 0.5rem;
+            border-radius: 50px;
+            display: flex;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            border: 1px solid #334155;
+        }
+
+        input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: white;
+            padding: 1rem 1.5rem;
+            font-size: 1.1rem;
+            outline: none;
+        }
+
+        button {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 0.8rem 2rem;
+            border-radius: 40px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        button:hover {
+            transform: scale(1.05);
+        }
+
+        .filters {
+            display: flex;
+            gap: 1rem;
+            margin-top: 1rem;
+            justify-content: center;
+            font-size: 0.9rem;
+            color: var(--text-dim);
+        }
+
+        .results {
+            width: 90%;
+            max-width: 800px;
+            margin-top: 2rem;
+            padding-bottom: 5rem;
+        }
+
+        .movie-card {
+            background: var(--card);
+            padding: 1.5rem;
+            border-radius: 12px;
+            margin-bottom: 1.5rem;
+            border-left: 4px solid var(--primary);
+            transition: background 0.3s;
+        }
+
+        .movie-card:hover {
+            background: #273548;
+        }
+
+        .movie-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .movie-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: #fff;
+        }
+
+        .movie-year {
+            color: var(--text-dim);
+            font-weight: 400;
+        }
+
+        .score-badge {
+            background: #065f46;
+            color: #34d399;
+            padding: 0.2rem 0.6rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .snippet {
+            margin-top: 1rem;
+            font-size: 0.95rem;
+            color: var(--text-dim);
+            line-height: 1.6;
+            font-style: italic;
+        }
+
+        .meta {
+            margin-top: 0.8rem;
+            display: flex;
+            gap: 1rem;
+            font-size: 0.8rem;
+            color: #64748b;
+        }
+
+        .loading {
+            text-align: center;
+            display: none;
+        }
+
+        .no-results {
+            text-align: center;
+            color: var(--text-dim);
+            margin-top: 3rem;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Oscar Insight Search</h1>
+        <p style="color: var(--text-dim); margin-top: 0.5rem;">Explora el cine con Inteligencia Híbrida</p>
+    </header>
+
+    <div class="search-container">
+        <form id="searchForm" class="search-box">
+            <input type="text" id="query" placeholder="Ej: masterpiece about atomic bomb and nolan" required>
+            <button type="submit">Buscar</button>
+        </form>
+        <div class="filters">
+            <span>Modelo: Hybrid (EBM + Vectors)</span>
+            <span>|</span>
+            <span>Top-k: 10</span>
+        </div>
+    </div>
+
+    <div id="loading" class="loading">Buscando en el corpus...</div>
+    <div id="resultsList" class="results"></div>
+
+    <script>
+        const form = document.getElementById('searchForm');
+        const resultsList = document.getElementById('resultsList');
+        const loading = document.getElementById('loading');
+
+        form.onsubmit = async (e) => {
+            e.preventDefault();
+            const query = document.getElementById('query').value;
+            
+            resultsList.innerHTML = '';
+            loading.style.display = 'block';
+
+            try {
+                const response = await fetch('/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query, top_k: 10 })
+                });
+
+                const data = await response.json();
+                loading.style.display = 'none';
+
+                if (data.results.length === 0) {
+                    resultsList.innerHTML = '<div class="no-results">No se encontraron películas para esa consulta.</div>';
+                    return;
+                }
+
+                data.results.forEach(movie => {
+                    const card = document.createElement('div');
+                    card.className = 'movie-card';
+                    card.innerHTML = `
+                        <div class="movie-header">
+                            <div>
+                                <span class="movie-title">${movie.title}</span>
+                                <span class="movie-year">(${movie.year})</span>
+                            </div>
+                            <span class="score-badge">Score: ${(movie.score * 100).toFixed(1)}%</span>
+                        </div>
+                        <div class="snippet">${movie.snippet}</div>
+                        <div class="meta">
+                            <span>EBM Score: ${movie.ebm_score.toFixed(3)}</span>
+                            <span>Vector Score: ${movie.vector_score.toFixed(3)}</span>
+                        </div>
+                    `;
+                    resultsList.appendChild(card);
+                });
+
+            } catch (err) {
+                loading.style.display = 'none';
+                resultsList.innerHTML = '<div class="no-results">Error al conectar con la API.</div>';
+            }
+        };
+    </script>
+</body>
+</html>
