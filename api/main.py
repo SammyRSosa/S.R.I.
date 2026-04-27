@@ -83,7 +83,7 @@ async def read_root(request: Request):
     """
     Sirve la página web principal del buscador.
     """
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 @app.get("/health", summary="Estado del Sistema", tags=["Sistema"])
 async def health_check():
