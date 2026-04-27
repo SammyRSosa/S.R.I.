@@ -1,271 +1,106 @@
 # Oscar Insight Search
-## Sistema de Recuperación de Información — Cine y Premios Oscar
+## Sistema de Recuperación de Información Híbrido — Cine y Premios Oscar
 
-> **Curso:** SRI 2025-2026 | **Corte actual:** 1 — Adquisición e Indexación
-> **Modelo de Recuperación:** Booleano Extendido (Baeza-Yates & Ribeiro-Neto, 2011)
-
----
-
-## Abstract
-
-*Oscar Insight Search* es un Sistema de Recuperación de Información (SRI) de dominio restringido orientado al cine y los Premios Oscar. El sistema integra datos de **TMDB** (metadatos estructurados: director, reparto, géneros, presupuesto) y **Letterboxd** (reseñas de usuarios en lenguaje natural) para construir un corpus cinematográfico de 2000+ documentos. El modelo de recuperación empleado es el **Modelo Booleano Extendido** (EBM), que supera las limitaciones del modelo booleano clásico al incorporar ponderación tf-idf y distancias euclidianas para producir un ranking continuo de documentos relevantes.
+> **Curso:** SRI 2025-2026 | **Versión:** 0.3.0 (Corte 3)
+> **Modelos:** Booleano Extendido ($p$-norm) + Búsqueda Semántica (Vectores FAISS)
 
 ---
 
-## 1. Dominio del Conocimiento
+## 1. Resumen del Proyecto
 
-| Atributo | Descripción |
-|---|---|
-| **Dominio** | Cine (películas en inglés, 1990–presente) |
-| **Fuentes** | TMDB API v3 (metadatos) + Letterboxd (reseñas) |
-| **Documentos** | 1,623+ películas indexadas |
-| **Términos en índice** | 16,381 términos únicos |
-| **Idioma** | Inglés (stop-words + stemming Snowball) |
-| **Cobertura temporal** | 1990 – 2026 |
+*Oscar Insight Search* es un motor de búsqueda avanzado diseñado para el dominio cinematográfico, específicamente películas vinculadas a los Premios Oscar. A diferencia de los buscadores tradicionales, este sistema utiliza una **arquitectura híbrida** que combina:
 
-### 1.1 Estructura del Documento (schema v2)
+1.  **Modelo Booleano Extendido (EBM)**: Implementación de la $p$-norma para permitir consultas booleanas "suaves" con ranking continuo.
+2.  **Búsqueda Semántica**: Uso de *embeddings* (Sentence-Transformers) y búsqueda aproximada (FAISS) para recuperar documentos por significado, superando la barrera del vocabulario exacto.
 
-Cada documento almacenado en `data/documents.json` tiene la siguiente estructura:
-
-```json
-{
-  "title": "Oppenheimer",
-  "year": "2023",
-  "metadata": {
-    "director": "Christopher Nolan",
-    "cast": ["Cillian Murphy", "Emily Blunt", "Matt Damon"],
-    "genres": ["Drama", "History"],
-    "budget": 100000000,
-    "revenue": 952000000,
-    "vote_average": 8.1,
-    "vote_count": 14200,
-    "imdb_id": "tt15398776",
-    "tmdb_id": 872585,
-    "source_url": "https://www.themoviedb.org/movie/872585",
-    "tagline": "The world forever changes."
-  },
-  "rich_text": "Oppenheimer. Drama History. Christopher Nolan. [sinopsis]. [reseñas...]",
-  "reviews_count": 0
-}
-```
+El corpus contiene **1,623 documentos** enriquecidos con metadatos de TMDB y críticas de alta calidad de Metacritic.
 
 ---
 
-## 2. Modelo de Recuperación: Booleano Extendido
+## 2. Arquitectura y Módulos
 
-### 2.1 Fundamento Teórico
+El sistema sigue una arquitectura modular y limpia:
 
-El Modelo Booleano Extendido (Salton et al., 1983; formalizado en Baeza-Yates & Ribeiro-Neto, 2011, Cap. 3) generaliza el modelo booleano clásico al:
-
-1. **Ponderar los términos** mediante tf-idf.
-2. **Calcular similitud** mediante distancias euclidianas, produciendo un score continuo ∈ [0, 1].
-
-### 2.2 Fórmulas Clave
-
-Para una consulta `q = t₁ AND t₂`:
-
-```
-sim_AND(d, q)  =  1 - sqrt( (1-w₁)² + (1-w₂)² ) / sqrt(2)
-sim_OR(d, q)   =  1 - sqrt( w₁² + w₂² ) / sqrt(2)
-```
-
-donde `wᵢ = tf(i,d) · idf(i)` es el peso tf-idf del término `tᵢ` en el documento `d`.
+*   `crawler/`: Adquisición sigilosa de datos usando TLS Fingerprinting (`curl_cffi`) para evadir bloqueos WAF.
+*   `indexer/`: Pipeline de NLP (NLTK) y lógica matemática del modelo EBM ($p$-norma).
+*   `database/`: Gestión de persistencia JSON y almacenamiento de vectores FAISS.
+*   `api/`: Servidor FastAPI que expone el motor híbrido y sirve la interfaz web.
+*   `scripts/`: Utilidades para la población masiva del corpus y pruebas de sistema.
 
 ---
 
-## 3. Arquitectura del Sistema
+## 3. Instalación y Despliegue
 
-```
-eserrei/
-├── crawler/                    # Módulo de Adquisición
-│   ├── __init__.py
-│   ├── tmdb_client.py          # Cliente TMDB API v3 (estrategia A: popularity + B: quality)
-│   └── scraper.py              # LetterboxdReviewScraper (reseñas de usuarios)
-│
-├── indexer/                    # Módulo de Indexación
-│   ├── __init__.py
-│   └── inverted_index.py       # Índice Invertido + pipeline NLTK (lower→tokenize→stop-words→stem)
-│
-├── database/                   # Módulo de Almacenamiento
-│   ├── __init__.py
-│   ├── store.py                # DocumentStore — persistencia JSON (schema v2)
-│   └── checkpoint.py           # Sistema de checkpointing para población incremental
-│
-├── api/                        # Módulo de Recuperación (FastAPI)
-│   ├── __init__.py
-│   └── main.py                 # Endpoints REST (search placeholder — Corte 2)
-│
-├── scripts/
-│   ├── populate_tmdb.py        # Orquestador principal de población (TMDB + Letterboxd)
-│   └── query.py                # Consulta interactiva del índice (CLI)
-│
-├── data/                       # Datos generados (excluidos del repo)
-│   ├── documents.json          # Corpus (1623+ películas)
-│   ├── index.json              # Índice invertido serializado
-│   └── checkpoint.json         # Estado de progreso del scraping
-│
-├── Dockerfile                  # Imagen multietapa Python 3.11-slim
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
-
-### 3.1 Pipeline de Procesamiento
-
-```
-TMDB API (discover/movie)
-     ↓  [Estrategia A: popularity.desc | Estrategia B: vote_average.desc]
-Film básico {tmdb_id, title, year, overview, vote_count}
-     ↓  [Filtro: vote_count ≥ 50, overview no vacío]
-TMDB API (movie/{id}?append_to_response=credits,external_ids)
-     ↓  [Enriquecimiento: director, cast, genres, budget, revenue, imdb_id]
-Letterboxd /film/{slug}/reviews/
-     ↓  [LetterboxdReviewScraper — hasta 15 reseñas/película]
-rich_text = title + tagline + genres + director + cast + overview + reviews
-     ↓  [InvertedIndex.add_film()]
-     ↓  [_tokenize: lower → word_tokenize → stop-words → SnowballStemmer]
-Posting List: término_stem → [(doc_id, tf), ...]
-     ↓  [Checkpoint cada 25 docs | Guardado a disco cada 50 docs]
-data/documents.json + data/index.json
-```
-
----
-
-## 4. Instalación y Uso
-
-### 4.1 Prerrequisitos
-
+### 3.1 Requisitos
 - Python 3.11+
-- API Key gratuita de TMDB → [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api)
+- Clave de API de TMDB.
 
-### 4.2 Entorno local
-
+### 3.2 Configuración del Entorno
 ```bash
-# Crear entorno virtual e instalar dependencias
-python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # Linux/macOS
+# 1. Clonar e instalar dependencias
 pip install -r requirements.txt
+
+# 2. Configurar API Key (opcional para ejecución, necesaria para recolección)
+# Windows (PowerShell):
+$env:TMDB_API_KEY = "tu_clave_aqui"
 ```
 
-### 4.3 Poblar la base de datos
-
+### 3.3 Preparación de Datos e Índices
+Para que el sistema sea operativo, se deben generar los índices TF-IDF y Vectoriales:
 ```bash
-# Población completa: 100 páginas TMDB (~2000 películas) + reviews Letterboxd
-python scripts/populate_tmdb.py --api-key TU_CLAVE_TMDB
-
-# Prueba rápida (3 páginas, sin reviews, ~60 films en ~2 min)
-python scripts/populate_tmdb.py --api-key TU_CLAVE_TMDB --pages 3 --no-reviews
-
-# Reanudar desde donde se interrumpió
-python scripts/populate_tmdb.py --api-key TU_CLAVE_TMDB --pages 100 --resume
-
-# Empezar de cero
-python scripts/populate_tmdb.py --api-key TU_CLAVE_TMDB --pages 100 --reset
+# Generar pesos EBM y Embeddings FAISS (Corte 2)
+python scripts/build_corte2.py
 ```
 
-> **Alternativa con variable de entorno:**
-> ```bash
-> $env:TMDB_API_KEY = "tu_clave"   # Windows PowerShell
-> python scripts/populate_tmdb.py
-> ```
-
-### 4.4 Consultar el índice
-
+### 3.4 Ejecución de la API y UI
 ```bash
-# Búsqueda por término(s)
-python scripts/query.py "dark cinematography"
-python scripts/query.py "christopher nolan" --show-docs
-python scripts/query.py "psychological thriller drama"
+# Iniciar el servidor
+uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
-
-### 4.5 Uso programático
-
-```python
-from crawler import TmdbClient, LetterboxdReviewScraper
-from database import DocumentStore
-from indexer  import InvertedIndex
-
-# Obtener metadatos de una película
-client  = TmdbClient(api_key="...")
-details = client.get_movie_details(872585)   # Oppenheimer
-# → {title, year, director, cast, genres, budget, revenue, imdb_id, ...}
-
-# Obtener reseñas de Letterboxd
-scraper = LetterboxdReviewScraper()
-reviews = scraper.get_reviews("Oppenheimer", year=2023, imdb_id="tt15398776")
-# → ["A masterpiece of epic cinema...", ...]
-
-# Consultar el índice
-store = DocumentStore()
-idx   = InvertedIndex()
-for doc_id, film in store.documents.items():
-    idx.add_film(doc_id, film)
-print(idx.get_postings("nolan"))    # [(14, 2), (89, 1), ...]
-```
-
-### 4.6 API REST
-
-```bash
-# Arrancar servidor de desarrollo
-uvicorn api.main:app --reload
-
-# Health check
-curl http://localhost:8000/
-
-# Documentación interactiva
-# http://localhost:8000/docs
-```
-
-### 4.7 Docker
-
-```bash
-# Construir imagen (incluye NLTK data)
-docker build -t oscar-insight:0.2 .
-
-# Ejecutar montando el volumen de datos
-docker run -p 8000:8000 \
-  -v "${PWD}/data:/app/data" \
-  -e TMDB_API_KEY=tu_clave \
-  oscar-insight:0.2
-```
+Una vez iniciado, acceda a:
+- **Interfaz Visual (UI)**: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
+- **Documentación API**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
 ---
 
-## 5. Estado del Proyecto
+## 4. Verificación del Sistema
 
-| Corte | Módulo | Estado |
+Para asegurar que el sistema está funcionando correctamente, realice las siguientes comprobaciones:
+
+1.  **Health Check**: Ejecute `curl http://127.0.0.1:8000/health`. Debe devolver un JSON con `status: "ok"` y el número de documentos cargados (>1600).
+2.  **Prueba de Integración**: Ejecute el script de prueba de búsqueda:
+    ```bash
+    python scripts/test_search.py
+    ```
+    Si recibe resultados con títulos de películas y fragmentos de críticas, el motor híbrido está operativo.
+
+---
+
+## 5. Detalles Técnicos (Configuración NLP)
+
+El sistema evita "valores mágicos" (hardcoded) permitiendo la configuración de parámetros críticos:
+
+- **Parámetro $p$**: Ajustable en la consulta (default 2.0). Controla la "estrictez" booleana.
+- **Pesos Híbridos**: La API permite balancear la importancia del modelo EBM vs Vectores (default 0.6 / 0.4).
+- **Modelo de Lenguaje**: Utiliza `all-MiniLM-L6-v2`, configurable en `VectorStore` para balancear velocidad y precisión.
+
+---
+
+## 6. Estado de Avance
+
+| Módulo | Descripción | Estado |
 |---|---|---|
-| 1 | Adquisición TMDB (`crawler/tmdb_client.py`) | ✅ Implementado |
-| 1 | Adquisición Letterboxd (`crawler/scraper.py`) | ✅ Implementado |
-| 1 | Indexación (`indexer/inverted_index.py`) | ✅ Implementado |
-| 1 | Almacenamiento (`database/store.py`) | ✅ Implementado |
-| 1 | Checkpointing (`database/checkpoint.py`) | ✅ Implementado |
-| 1 | Corpus (1623 docs, 16381 términos) | ✅ Generado |
-| 2 | Motor EBM (`api/search`) | 🔲 Pendiente |
-| 2 | Ranking tf-idf + distancias euclidianas | 🔲 Pendiente |
-| 3 | RAG + Interfaz web | 🔲 Pendiente |
+| Adquisición | TMDB + Metacritic (User Reviews) | ✅ Completado |
+| Indexación | Inverted Index + Pipeline NLTK | ✅ Completado |
+| Corte 2 | Modelo Booleano Extendido ($p$-norm) | ✅ Completado |
+| Corte 2 | Búsqueda Semántica (FAISS) | ✅ Completado |
+| Corte 3 | Interfaz Visual (HTML5/Inter JS) | ✅ Completado |
+| Despliegue | Dockerización Multietapa | ✅ Completado |
 
 ---
 
-## 6. Control de Versiones
+## 7. Referencias
 
-```bash
-git init
-git add .
-git commit -m "feat(corte-1): adquisición TMDB + indexación — 1623 docs, 16381 términos"
-```
-
----
-
-## 7. Referencias Bibliográficas
-
-1. Baeza-Yates, R., & Ribeiro-Neto, B. (2011). *Modern Information Retrieval: The Concepts and Technology behind Search* (2nd ed.). Addison-Wesley.
-2. Salton, G., Fox, E. A., & Wu, H. (1983). Extended Boolean information retrieval. *Communications of the ACM*, 26(11), 1022–1036.
-3. Bird, S., Klein, E., & Loper, E. (2009). *Natural Language Processing with Python*. O'Reilly Media.
-4. The Movie Database. (2024). *TMDB API Documentation*. https://developer.themoviedb.org/
-5. The Web Robots Pages. (2024). *robots.txt standard*. https://www.robotstxt.org/
-
----
-
-*Documento generado para el Proyecto Integrador SRI 2025-2026.*
+1. Baeza-Yates, R., & Ribeiro-Neto, B. (2011). *Modern Information Retrieval*.
+2. Salton, G., et al. (1983). *Extended Boolean information retrieval*.
+3. TMDB API Documentation: [developer.themoviedb.org](https://developer.themoviedb.org/)
