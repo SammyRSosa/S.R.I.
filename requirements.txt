@@ -11,10 +11,11 @@ sentence-transformers>=3.3.0
 faiss-cpu>=1.9.0
 numpy>=1.26.0
 
-# ─── API ──────────────────────────────────────────────────────────────────────
+# ─── API y Generación (RAG / Corte 2) ──────────────────────────────────────────
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 pydantic>=2.10.0
-
-# ─── Config ───────────────────────────────────────────────────────────────────
+groq>=0.9.0             # LLM Inference (Llama 3 en Groq)
+duckduckgo-search>=6.0.0 # Búsqueda Web Fallback
 python-dotenv>=1.0.1
+

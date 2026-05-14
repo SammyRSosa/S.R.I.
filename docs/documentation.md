@@ -105,10 +105,15 @@ Hola! Te explico paso a paso el flujo completo de funcionamiento de esta aplicac
 5. **Levantar API**: Ejecutar `uvicorn api.main:app --reload` (o similar) para servir búsquedas.
 6. **Búsqueda**: Usuarios envían queries (ej.: "psychological thriller nolan") y reciben resultados híbridos.
 
-#### Consideraciones Técnicas
-- **Idioma y dominio**: Solo películas en inglés de 1990 en adelante, enfocadas en Oscars.
-- **Rendimiento**: Checkpointing para procesos largos; guardado incremental cada 50 docs.
-- **Calidad**: Filtros estrictos para asegurar texto rico (sinopsis + reseñas).
-- **Escalabilidad**: Usa FAISS para búsquedas vectoriales eficientes en grandes datasets.
+#### 6. **Corte 2: Integración Avanzada (RAG y Web Search)**
+   - **Módulo RAG**: Extiende la búsqueda híbrida permitiendo respuestas conversacionales. Utiliza el contexto recuperado para alimentar un LLM (Llama 3 vía Groq).
+   - **Búsqueda Web Fallback**: Si la base de datos local no contiene suficiente información, el sistema consulta automáticamente a la web (DuckDuckGo), procesa los resultados e intenta responder con datos frescos.
+   - **Posicionamiento**: Se ha refinado el ranking integrando la popularidad de TMDB y la frescura (año) en el score final.
+
+#### 7. **Consideraciones Técnicas y Dependencias**
+- **LLM**: Groq (Llama 3) para generación RAG.
+- **Web Search**: DuckDuckGo Search API.
+- **Idioma**: Soporte para consultas en Español/Inglés.
+
 
 Si quieres profundizar en alguna parte (ej.: cómo funciona exactamente el EBM o ver código de un módulo específico), ¡dímelo! También puedo ejecutar pruebas o mostrar ejemplos de consultas. 😊

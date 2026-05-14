@@ -1,0 +1,32 @@
+[
+    {
+        "query": "James Cameron Pandora",
+        "relevant_ids": ["0"],
+        "description": "Avatar: Fire and Ash by James Cameron"
+    },
+    {
+        "query": "Christopher Nolan atomic bomb",
+        "relevant_ids": ["112"],
+        "description": "Oppenheimer"
+    },
+    {
+        "query": "dreams and heist Christopher Nolan",
+        "relevant_ids": ["48"],
+        "description": "Inception"
+    },
+    {
+        "query": "Oppenheimer historical drama",
+        "relevant_ids": ["112"],
+        "description": "Oppenheimer"
+    },
+    {
+        "query": "Avatar sci-fi Cameron",
+        "relevant_ids": ["0"],
+        "description": "Avatar series"
+    },
+    {
+        "query": "Christopher Nolan science fiction",
+        "relevant_ids": ["48", "112"],
+        "description": "Inception and Oppenheimer (partially)"
+    }
+]

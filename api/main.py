@@ -11,6 +11,8 @@ from database.store import DocumentStore
 from indexer.inverted_index import InvertedIndex
 from indexer.ebm import ExtendedBooleanModel
 from database.vector_store import VectorStore
+from api.rag import rag_manager
+from crawler.web_search import web_searcher
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -69,12 +71,28 @@ class SearchResult(BaseModel):
     ebm_score: float
     vector_score: float
     snippet: str
+    director: str = "N/A"
+    cast: List[str] = []
+    genres: List[str] = []
+    is_web_result: bool = False
+
 
 class SearchResponse(BaseModel):
     """Estructura de respuesta de la API."""
     query: str
     total_results: int
     results: List[SearchResult]
+    was_web_search: bool = False
+
+class ChatRequest(BaseModel):
+    """Parámetros para la generación de respuesta inteligente."""
+    query: str
+    results: List[SearchResult]
+
+class ChatResponse(BaseModel):
+    """Respuesta generada por el LLM."""
+    query: str
+    answer: str
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
@@ -102,12 +120,7 @@ async def health_check():
 async def search(request: SearchRequest):
     """
     Realiza una búsqueda combinando el Modelo Booleano Extendido y Búsqueda Vectorial.
-    
-    Proceso:
-    1. Tokenización y normalización de la query.
-    2. Cálculo de similitud p-norma (EBM).
-    3. Cálculo de similitud de coseno sobre embeddings FAISS.
-    4. Fusión de resultados mediante combinación lineal ponderada.
+    Activa búsqueda web si los resultados locales son insuficientes.
     """
     query = request.query
     ebm.p = request.p
@@ -124,17 +137,35 @@ async def search(request: SearchRequest):
     all_doc_ids = set(ebm_map.keys()) | set(vector_map.keys())
     combined = []
     
+    # Obtener el año actual para cálculo de frescura
+    from datetime import datetime
+    current_year = datetime.now().year
+
     for doc_id in all_doc_ids:
         s_ebm = ebm_map.get(doc_id, 0.0)
         s_vec = vector_map.get(doc_id, 0.0)
         
-        # Combinación lineal con pesos configurables
+        # Combinación lineal base
         h_score = (s_ebm * request.ebm_weight) + (s_vec * request.vector_weight) 
         
         film = store.get_film(doc_id)
         if not film: continue
         
-        # Generación de Snippet inteligente (contextual a la query)
+        # --- POSICIONAMIENTO AVANZADO (Corte 3) ---
+        # 1. Factor Popularidad (Normalizado de 0 a 1, asumiendo max ~100)
+        pop = float(film.get("popularity", 0))
+        pop_factor = min(1.0, pop / 100.0) * 0.1 # Pesa un 10%
+        
+        # 2. Factor Frescura (Más recientes arriba)
+        try:
+            f_year = int(film.get("year", 0))
+            fresh_factor = max(0, 1.0 - (current_year - f_year) / 50.0) * 0.05 # Pesa un 5%
+        except:
+            fresh_factor = 0
+            
+        final_score = h_score + pop_factor + fresh_factor
+        
+        # Generación de Snippet inteligente
         text = film.get("rich_text", "") or film.get("synopsis", "")
         tokens = idx._tokenize(query)
         snippet = text[:200] + "..."
@@ -150,20 +181,50 @@ async def search(request: SearchRequest):
             doc_id=doc_id,
             title=film.get("title", "Unknown"),
             year=str(film.get("year", "N/A")),
-            score=round(h_score, 4),
+            score=round(final_score, 4),
             ebm_score=round(s_ebm, 4),
             vector_score=round(s_vec, 4),
-            snippet=snippet
+            snippet=snippet,
+            director=film.get("director", "N/A"),
+            cast=film.get("cast", []),
+            genres=film.get("genres", []),
+            is_web_result=False
+
         ))
         
-    # Ordenar por score combinado y limitar a top_k
+    # Ordenar por score combinado
     combined.sort(key=lambda x: x.score, reverse=True)
-    results = combined[:request.top_k]
     
-    logger.info("Search: '%s' -> %d results.", query, len(combined))
+    # --- MÓDULO DE BÚSQUEDA WEB AUTOMÁTICO (Corte 2) ---
+    was_web_search = False
+    # Disparador: Menos de 3 resultados o el mejor resultado tiene score bajo (< 0.25 en base h_score)
+    top_score = combined[0].score if combined else 0
+    if len(combined) < 3 or top_score < 0.25:
+        web_results = web_searcher.search_and_format(query)
+        if web_results:
+            was_web_search = True
+            # Convertir dicts a SearchResult objects
+            web_objects = [SearchResult(**r) for r in web_results]
+            combined.extend(web_objects)
+            combined.sort(key=lambda x: x.score, reverse=True)
+
+    results = combined[:request.top_k]
+    logger.info("Search: '%s' -> %d results (Web: %s).", query, len(combined), was_web_search)
     
     return SearchResponse(
         query=query,
         total_results=len(combined),
-        results=results
+        results=results,
+        was_web_search=was_web_search
     )
+
+@app.post("/chat", response_model=ChatResponse, summary="Generación RAG", tags=["Recuperación"])
+async def chat(request: ChatRequest):
+    """
+    Toma los resultados de búsqueda y genera una respuesta inteligente (RAG).
+    """
+    answer = rag_manager.generate_response(
+        query=request.query,
+        retrieved_docs=[r.model_dump() for r in request.results]
+    )
+    return ChatResponse(query=request.query, answer=answer)
