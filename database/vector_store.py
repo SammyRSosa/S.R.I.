@@ -40,18 +40,25 @@ class VectorStore:
     DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
     TEXT_LIMIT = 2000 # Límite de caracteres para evitar truncamiento excesivo
     
-    def __init__(self, data_dir: str | Path = DEFAULT_DATA_DIR, model_name: str = DEFAULT_MODEL) -> None:
+    def __init__(self, data_dir: str | Path | None = DEFAULT_DATA_DIR, model_name: str = DEFAULT_MODEL, in_memory: bool = False) -> None:
         """
         Inicializa el almacén vectorial.
 
         Args:
             data_dir: Carpeta donde se guardarán los archivos binarios.
             model_name: Nombre del modelo de HuggingFace a utilizar.
+            in_memory: Si es True, no carga ni guarda del disco.
         """
-        self.data_dir = Path(data_dir)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.index_path = self.data_dir / self.VECTOR_FILE
-        self.mapping_path = self.data_dir / self.MAPPING_FILE
+        self.in_memory = in_memory
+        self.data_dir = Path(data_dir) if data_dir else None
+        
+        if self.data_dir and not self.in_memory:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            self.index_path = self.data_dir / self.VECTOR_FILE
+            self.mapping_path = self.data_dir / self.MAPPING_FILE
+        else:
+            self.index_path = None
+            self.mapping_path = None
         
         logger.info("Cargando modelo de embeddings: %s", model_name)
         self.model = SentenceTransformer(model_name)
@@ -66,7 +73,8 @@ class VectorStore:
         self.vector_to_doc: dict[int, int] = {}
         self.doc_to_vector: dict[int, int] = {}
         
-        self.load()
+        if not self.in_memory:
+            self.load()
         
     def build_from_documents(self, documents: dict[int, dict]) -> None:
         """
@@ -112,6 +120,28 @@ class VectorStore:
         self.save()
         logger.info("Índice FAISS finalizado con %d vectores.", self.index.ntotal)
 
+    def build_from_texts(self, texts: list[str]) -> None:
+        """
+        Codifica una lista de textos planos y construye el índice FAISS en memoria.
+        Útil para indexar en tiempo real resultados de búsqueda web.
+        """
+        logger.info("Generando embeddings para %d chunks temporales...", len(texts))
+        if not texts:
+            logger.warning("No se proporcionaron textos para indexación temporal.")
+            return
+            
+        embeddings = self.model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+        faiss.normalize_L2(embeddings)
+        
+        self.index = faiss.IndexFlatIP(self.embedding_dim)
+        self.index.add(embeddings)
+        
+        # Mapeamos el ID del vector en FAISS al índice de la lista de textos (0 a N-1)
+        self.vector_to_doc = {i: i for i in range(len(texts))}
+        self.doc_to_vector = {i: i for i in range(len(texts))}
+        
+        logger.info("Índice FAISS temporal construido con %d vectores.", self.index.ntotal)
+
     def search(self, query: str, top_k: int = 10) -> list[tuple[int, float]]:
         """
         Busca los documentos más cercanos semánticamente a la consulta.
@@ -121,10 +151,10 @@ class VectorStore:
             top_k: Número máximo de resultados.
 
         Returns:
-            Lista de tuplas (doc_id, similitud_coseno) ordenada de mayor a menor.
+            Lista de tuplas (doc_id o idx, similitud_coseno) ordenada de mayor a menor.
         """
         if self.index.ntotal == 0:
-            logger.warning("El índice vectorial está vacío. Ejecute build_from_documents.")
+            logger.warning("El índice vectorial está vacío. Ejecute un método build primero.")
             return []
             
         # Codificar y normalizar la consulta
@@ -148,6 +178,8 @@ class VectorStore:
         
     def save(self) -> None:
         """Persiste el índice binario y el mapeo de IDs en disco."""
+        if self.in_memory or not self.index_path or not self.mapping_path:
+            return
         try:
             faiss.write_index(self.index, str(self.index_path))
             with open(self.mapping_path, "w", encoding="utf-8") as f:
@@ -158,6 +190,8 @@ class VectorStore:
             
     def load(self) -> None:
         """Carga el índice y mapeos existentes para evitar re-entrenamiento."""
+        if self.in_memory or not self.index_path or not self.mapping_path:
+            return
         if self.index_path.exists() and self.mapping_path.exists():
             try:
                 self.index = faiss.read_index(str(self.index_path))

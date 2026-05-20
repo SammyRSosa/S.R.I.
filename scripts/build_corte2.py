@@ -42,11 +42,10 @@ def main():
     ebm.build_weights()
     
     # ── 2. Construir modelo FAISS (Vectores) ──
-    logger.info("Inicializando modelo Vectorial Sentence-Transformers + FAISS...")
-    v_store = VectorStore()
-    v_store.build_from_documents(store.documents)
+    logger.info("⚠️ Saltando construcción de modelo Vectorial local (por requerimiento de cátedra).")
+    logger.info("Los embeddings se calcularán únicamente en tiempo real durante la búsqueda web.")
     
-    logger.info("✅ Construcción finalizada. EBM y FAISS persistidos en disco.")
+    logger.info("✅ Construcción finalizada. EBM persistido en disco.")
 
 if __name__ == "__main__":
     main()

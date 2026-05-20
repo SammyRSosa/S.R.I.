@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 from database.store import DocumentStore
 from indexer.inverted_index import InvertedIndex
 from indexer.ebm import ExtendedBooleanModel
-from database.vector_store import VectorStore
 from api.rag import rag_manager
 from crawler.web_search import web_searcher
 
@@ -34,9 +33,8 @@ if store.documents:
     for doc_id, data in store.documents.items():
         idx.add_film(doc_id, data)
 
-# Cargar motores de ranking avanzado (EBM y FAISS)
+# Cargar motores de ranking avanzado (EBM)
 ebm = ExtendedBooleanModel(store, idx, p=2.0)
-v_store = VectorStore()
 
 # ─── Aplicación FastAPI ───────────────────────────────────────────────────────
 app = FastAPI(
@@ -110,46 +108,34 @@ async def health_check():
     """
     return {
         "status": "ok",
-        "model": "Hybrid (EBM + Vector)",
+        "model": "Extended Boolean Model (EBM)",
         "docs_loaded": len(store.documents),
-        "vocab_size": idx.vocabulary_size,
-        "vector_index_size": v_store.index.ntotal if v_store.index else 0
+        "vocab_size": idx.vocabulary_size
     }
 
-@app.post("/search", response_model=SearchResponse, summary="Búsqueda Híbrida", tags=["Recuperación"])
+@app.post("/search", response_model=SearchResponse, summary="Búsqueda Local EBM con Web Fallback", tags=["Recuperación"])
 async def search(request: SearchRequest):
     """
-    Realiza una búsqueda combinando el Modelo Booleano Extendido y Búsqueda Vectorial.
-    Activa búsqueda web si los resultados locales son insuficientes.
+    Realiza una búsqueda utilizando el Modelo Booleano Extendido (EBM) de forma exclusiva para el corpus local.
+    Activa búsqueda web fallback si los resultados locales son insuficientes.
     """
     query = request.query
     ebm.p = request.p
     
     # 1. Búsqueda EBM (Lógica Booleana Suave)
     ebm_results = ebm.search(query, op="OR")
-    ebm_map = {doc_id: score for doc_id, score in ebm_results}
     
-    # 2. Búsqueda Vectorial (Semántica profunda)
-    vector_results = v_store.search(query, top_k=50)
-    vector_map = {doc_id: score for doc_id, score in vector_results}
-    
-    # 3. Combinación Híbrida y Generación de Snippets
-    all_doc_ids = set(ebm_map.keys()) | set(vector_map.keys())
+    # 2. Construcción de resultados locales y cálculo de score combinado
     combined = []
     
     # Obtener el año actual para cálculo de frescura
     from datetime import datetime
     current_year = datetime.now().year
 
-    for doc_id in all_doc_ids:
-        s_ebm = ebm_map.get(doc_id, 0.0)
-        s_vec = vector_map.get(doc_id, 0.0)
-        
-        # Combinación lineal base
-        h_score = (s_ebm * request.ebm_weight) + (s_vec * request.vector_weight) 
-        
+    for doc_id, s_ebm in ebm_results:
         film = store.get_film(doc_id)
-        if not film: continue
+        if not film: 
+            continue
         
         # --- POSICIONAMIENTO AVANZADO (Corte 3) ---
         # 1. Factor Popularidad (Normalizado de 0 a 1, asumiendo max ~100)
@@ -163,7 +149,7 @@ async def search(request: SearchRequest):
         except:
             fresh_factor = 0
             
-        final_score = h_score + pop_factor + fresh_factor
+        final_score = s_ebm + pop_factor + fresh_factor
         
         # Generación de Snippet inteligente
         text = film.get("rich_text", "") or film.get("synopsis", "")
@@ -183,13 +169,12 @@ async def search(request: SearchRequest):
             year=str(film.get("year", "N/A")),
             score=round(final_score, 4),
             ebm_score=round(s_ebm, 4),
-            vector_score=round(s_vec, 4),
+            vector_score=0.0,  # 100% EBM local
             snippet=snippet,
             director=film.get("director", "N/A"),
             cast=film.get("cast", []),
             genres=film.get("genres", []),
             is_web_result=False
-
         ))
         
     # Ordenar por score combinado
@@ -197,7 +182,7 @@ async def search(request: SearchRequest):
     
     # --- MÓDULO DE BÚSQUEDA WEB AUTOMÁTICO (Corte 2) ---
     was_web_search = False
-    # Disparador: Menos de 3 resultados o el mejor resultado tiene score bajo (< 0.25 en base h_score)
+    # Disparador: Menos de 3 resultados o el mejor resultado tiene score bajo (< 0.25)
     top_score = combined[0].score if combined else 0
     if len(combined) < 3 or top_score < 0.25:
         web_results = web_searcher.search_and_format(query)
@@ -206,6 +191,7 @@ async def search(request: SearchRequest):
             # Convertir dicts a SearchResult objects
             web_objects = [SearchResult(**r) for r in web_results]
             combined.extend(web_objects)
+            # Re-ordenar la combinación por score
             combined.sort(key=lambda x: x.score, reverse=True)
 
     results = combined[:request.top_k]

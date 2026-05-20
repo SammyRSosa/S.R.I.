@@ -71,19 +71,22 @@ Originalmente diseñado para Letterboxd, pero actualizado a **Metacritic** porqu
 - Letterboxd tiene mucho "ruido" (chistes internos, spoilers cortos).
 - Otros sitios (IMDb, Rotten Tomatoes) bloquean con protecciones anti-bot (DataDome, Cloudflare).
 
-##### **¿Cómo funciona el scraper?**
+##### **¿Cómo funciona el crawler enfocado dinámico?**
 - **Librería**: Usa `curl_cffi` (en lugar de `requests` estándar) para impersonar un navegador real (TLS fingerprinting de Chrome 124). Esto evade protecciones WAF/Cloudflare que bloquean bots.
 - **Sesión**: Una sesión persistente con headers de Chrome real (User-Agent, Accept, etc.).
 - **Delay**: Espera aleatoria (1.5-3.5 segundos) entre requests para simular comportamiento humano y evitar bans.
 
-##### **¿Cómo extrae los datos?**
+##### **¿Cómo extrae los datos el pipeline de crawling enfocado?**
 - **Método `get_reviews(title, year, imdb_id, max_reviews)`**:
-  - Convierte el título en un "slug" (ej.: "Oppenheimer" → "oppenheimer" o "oppenheimer-2023").
-  - Construye URL: `https://www.metacritic.com/movie/{slug}/user-reviews/`.
-  - Hace GET request y parsea el HTML con BeautifulSoup.
-  - Busca reseñas en tags `<span>` o `<div>` con clases específicas (ej.: `review-card__quote`).
-  - Filtra: Solo reseñas largas (100-3000 caracteres), sin texto de UI ("Sign in", "Expand").
-  - Retorna lista de strings (reseñas limpias).
+  1. **URL Semilla (Seed URL)**: Construye la URL de búsqueda semilla `https://www.metacritic.com/search/{slug}/` e inicia el viaje.
+  2. **Análisis de Enlaces (Link Extraction)**: Descarga y parsea la página de búsqueda con BeautifulSoup, extrayendo las etiquetas `<a>` con su atributo `href`.
+  3. **Resolución de URLs**: Resuelve los enlaces usando la URL origen como referencia mediante `urllib.parse.urljoin(current_url, href)`. Esto asegura que los enlaces relativos se resuelvan correctamente.
+  4. **Análisis de Dominio (Domain check)**: Verifica si el enlace absoluto pertenece internamente al dominio `metacritic.com`. Si es un enlace externo (ej. redes sociales u otros sitios), **se decide no salir del dominio** (filtrado).
+  5. **Análisis de Ruta y Heurística**: Filtra los enlaces internos que coincidan con la ruta `/movie/{slug}/` usando una heurística que valida la coincidencia exacta o de substring del título y año de la película.
+  6. **Viaje a Detalles**: Sigue el enlace descubierto hacia la página de detalles de la película (ej: `https://www.metacritic.com/movie/oppenheimer/`).
+  7. **Descubrimiento de Reseñas**: En la página de detalles, extrae y analiza nuevamente todos los enlaces y descubre de forma dinámica el enlace que apunta al subdirectorio `/user-reviews/`.
+  8. **Viaje y Extracción final**: Sigue la URL descubierta de reseñas de usuarios y extrae las críticas largas (usando una estrategia robusta para soportar diseños modernos con clases CSS como `break-words`).
+  - **Robustez y Fallbacks**: Si alguna etapa del crawling dinámico encuentra problemas (ej. búsqueda bloqueada o película extremadamente nueva sin resultados), el crawler cuenta con un mecanismo de fallback seguro que autogenera la ruta directa para evitar perder información.
 - **Compatibilidad**: El código mantiene alias como `LetterboxdReviewScraper` para no romper el pipeline existente.
 
 ##### **¿Por qué necesita evadir protecciones?**
@@ -91,11 +94,11 @@ Originalmente diseñado para Letterboxd, pero actualizado a **Metacritic** porqu
 - `curl_cffi` simula un navegador real, permitiendo acceso.
 
 #### Integración en el Flujo General
-- En populate_tmdb.py: Primero usa `TmdbClient` para obtener listas y detalles, luego `MetacriticReviewScraper` para reseñas.
+- En populate_tmdb.py: Primero usa `TmdbClient` para obtener listas y detalles, luego `MetacriticReviewScraper` para reseñas de manera dinámica.
 - Los datos se combinan en un "rich_text" (título + sinopsis + reseñas) para indexación.
 - Ejemplo de uso: `python populate_tmdb.py --api-key TU_CLAVE` pobla la DB con TMDB + reseñas.
 
-Si quieres ver ejemplos de código o ejecutar una prueba (ej.: obtener detalles de una película), ¡dímelo! También puedo explicar cómo actualizar el scraper si cambian los selectores de Metacritic. 😊
+Si quieres ver ejemplos de código o ejecutar una prueba (ej.: obtener detalles de una película), ¡dímelo! 😊
 
 
 

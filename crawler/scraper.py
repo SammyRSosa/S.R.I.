@@ -116,21 +116,32 @@ class MetacriticReviewScraper:
         soup = BeautifulSoup(html, "lxml")
         reviews = []
         
-        # Metacritic renders user reviews primarily in spans inside review structures
-        for tag in soup.find_all("span"):
+        # 1. Modern Metacritic: Look for div elements inside the reviews list that have Tailwind classes like break-words
+        for tag in soup.find_all("div", class_=lambda c: c and "break-words" in c):
             text = tag.get_text(separator=" ", strip=True)
             text = re.sub(r"\s+", " ", text).strip()
-            
-            # Filtro de calidad para Metacritic: evitar meta tags y buscar texto rico real
             if 100 < len(text) < 3000 and "Expand" not in text and text not in reviews:
-                # Omitir textos de UI si lograron pasar la longitud
                 if "metacritic" not in text.lower() and "sign in" not in text.lower():
                     reviews.append(text)
-                    
             if len(reviews) >= max_n:
                 break
+
+        # 2. Metacritic renders user reviews primarily in spans inside review structures
+        if not reviews:
+            for tag in soup.find_all("span"):
+                text = tag.get_text(separator=" ", strip=True)
+                text = re.sub(r"\s+", " ", text).strip()
                 
-        # Fallback si span no arroja resultados, buscar los divs de quotes
+                # Filtro de calidad para Metacritic: evitar meta tags y buscar texto rico real
+                if 100 < len(text) < 3000 and "Expand" not in text and text not in reviews:
+                    # Omitir textos de UI si lograron pasar la longitud
+                    if "metacritic" not in text.lower() and "sign in" not in text.lower():
+                        reviews.append(text)
+                        
+                if len(reviews) >= max_n:
+                    break
+                    
+        # 3. Fallback si span no arroja resultados, buscar los divs de quotes
         if not reviews:
             for tag in soup.find_all("div", class_=lambda c: c and any(cls in c for cls in REVIEW_CLASSES)):
                 text = tag.get_text(separator=" ", strip=True)
@@ -143,6 +154,42 @@ class MetacriticReviewScraper:
 
     # ─── API pública ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _is_internal(url: str) -> bool:
+        """Verifica si un URL absoluto pertenece al dominio metacritic.com."""
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(url)
+            # Aceptamos metacritic.com o subdominios
+            return "metacritic.com" in (parsed.netloc or "")
+        except Exception:
+            return False
+
+    def _is_movie_match(self, url_path: str, link_text: str, target_title: str, target_year: Optional[int]) -> bool:
+        """Determina heurísticamente si una ruta de URL corresponde a la película buscada."""
+        target_slug = self._slugify(target_title)
+        path_parts = [p for p in url_path.split('/') if p]
+        if not path_parts or path_parts[0] != "movie":
+            return False
+        
+        url_slug = path_parts[1] if len(path_parts) > 1 else ""
+        if not url_slug:
+            return False
+            
+        # Comparación exacta de slugs
+        if url_slug == target_slug:
+            return True
+            
+        # Substring matching (ej. "oppenheimer-2023" contiene "oppenheimer")
+        if target_slug in url_slug or url_slug in target_slug:
+            if target_year:
+                # Comprobar si el año está presente en el slug de la URL o en el texto del enlace
+                if str(target_year) in url_slug or str(target_year) in link_text:
+                    return True
+            return True
+            
+        return False
+
     def get_reviews(
         self,
         title: str,
@@ -151,27 +198,93 @@ class MetacriticReviewScraper:
         max_reviews: int = 10,
     ) -> list[str]:
         """
-        Obtiene `max_reviews` críticas largas (User Reviews) de Metacritic.
+        Obtiene `max_reviews` críticas largas (User Reviews) de Metacritic
+        usando un pipeline de Focused Crawling dinámico.
         """
+        from urllib.parse import urljoin, urlparse
+        
         slug = self._slugify(title)
-        logger.info("――― Metacritic: '%s' (%s) -> slug: %s", title, year or "?", slug)
+        logger.info("――― Dynamic Crawler: '%s' (%s) -> query slug: %s", title, year or "?", slug)
 
-        # Tratar variaciones de slug si Metacritic anexa el año 
-        candidates = [slug]
-        if year:
-            candidates.append(f"{slug}-{year}")
-
-        for s in candidates:
-            url = f"{BASE_URL}/movie/{s}/user-reviews/"
-            html = self._get(url, label=f"slug:{s}")
+        # ── PASO 1: Página semilla de búsqueda ─────────────────────────────────
+        # Construimos la URL de búsqueda como punto de inicio (seed URL)
+        seed_url = f"{BASE_URL}/search/{slug}/"
+        logger.info("  [1] Seed URL de busqueda: %s", seed_url)
+        
+        html_search = self._get(seed_url, label=f"search:{slug}")
+        movie_url = None
+        
+        if html_search:
+            # ── PASO 2: Extracción y análisis de enlaces en página de búsqueda ────
+            soup_search = BeautifulSoup(html_search, "lxml")
+            links = soup_search.find_all("a", href=True)
+            logger.info("  [2] Extraidos %d enlaces de la busqueda. Analizando...", len(links))
             
-            if html:
-                reviews = self._parse_reviews(html, max_reviews)
-                if reviews:
-                    logger.info("  -> Total: %d reseñas ricas (Metacritic)", len(reviews))
-                    return reviews
+            for link in links:
+                href = link["href"]
+                # A: Resolución de URL usando la URL donde fue encontrada como referencia (Carlos's requirement)
+                abs_url = urljoin(seed_url, href)
+                parsed = urlparse(abs_url)
+                
+                # B: Análisis de dominio: ¿es interno o sale del dominio?
+                is_internal = self._is_internal(abs_url)
+                if not is_internal:
+                    # C: Elección: elegir no salir de metacritic.com
+                    continue
                     
-        logger.warning("  -> No localizado / Sin reseñas largas.")
+                # D: Análisis de ruta/heurística de película
+                link_text = link.get_text(strip=True)
+                if self._is_movie_match(parsed.path, link_text, title, year):
+                    movie_url = abs_url
+                    logger.info("  -> Descubierto enlace de pelicula coincidente: %s (Texto: '%s')", movie_url, link_text)
+                    break
+        
+        # Fallback de seguridad si el crawling de búsqueda no dio resultados o falló
+        if not movie_url:
+            fallback_slug = f"{slug}-{year}" if year else slug
+            movie_url = f"{BASE_URL}/movie/{fallback_slug}/"
+            logger.warning("  -> Fallback: no se descubrio el enlace por busqueda. Probando ruta directa: %s", movie_url)
+
+        # ── PASO 3: Crawler viaja a la página de detalles y busca user reviews ─
+        logger.info("  [3] Crawleando pagina de detalles: %s", movie_url)
+        html_details = self._get(movie_url, label="details")
+        user_reviews_url = None
+        
+        if html_details:
+            soup_details = BeautifulSoup(html_details, "lxml")
+            details_links = soup_details.find_all("a", href=True)
+            
+            for link in details_links:
+                href = link["href"]
+                abs_url = urljoin(movie_url, href)
+                
+                # Comprobación de dominio
+                if not self._is_internal(abs_url):
+                    continue
+                    
+                # Comprobación de ruta de user-reviews
+                parsed = urlparse(abs_url)
+                if "/user-reviews/" in parsed.path or parsed.path.endswith("/user-reviews"):
+                    user_reviews_url = abs_url
+                    logger.info("  -> Descubierto enlace de reseñas de usuario: %s", user_reviews_url)
+                    break
+
+        # Fallback de seguridad si no se descubrió el enlace en la página de detalles
+        if not user_reviews_url:
+            user_reviews_url = urljoin(movie_url, "user-reviews/")
+            logger.warning("  -> Fallback: no se encontro enlace de reseñas en la pagina. Probando: %s", user_reviews_url)
+
+        # ── PASO 4: Crawler viaja a la página de reseñas y extrae ─────────────
+        logger.info("  [4] Crawleando pagina de reseñas de usuario: %s", user_reviews_url)
+        html_reviews = self._get(user_reviews_url, label="reviews")
+        
+        if html_reviews:
+            reviews = self._parse_reviews(html_reviews, max_reviews)
+            if reviews:
+                logger.info("  -> Total: %d reseñas ricas (Metacritic)", len(reviews))
+                return reviews
+                
+        logger.warning("  -> Sin reseñas localizadas tras el proceso de crawling.")
         return []
 
 # Compatibilidad con el pipeline de enriquecimiento actual

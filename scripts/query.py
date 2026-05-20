@@ -14,11 +14,17 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import io
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
+
+# ── Forzar UTF-8 en Windows ───────────────────────────────────────────────────
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from database import DocumentStore
 from indexer import InvertedIndex
