@@ -12,6 +12,8 @@ from indexer.inverted_index import InvertedIndex
 from indexer.ebm import ExtendedBooleanModel
 from api.rag import rag_manager
 from crawler.web_search import web_searcher
+from database.vector_store import VectorStore
+from indexer.recommender import MovieRecommender
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +37,16 @@ if store.documents:
 
 # Cargar motores de ranking avanzado (EBM)
 ebm = ExtendedBooleanModel(store, idx, p=2.0)
+
+# Cargar motor de recomendaciones (VSM Híbrido)
+recommender = MovieRecommender(store, ebm)
+
+# Instanciar VectorStore (para resolver dependencias con scripts de evaluación y compatibilidad)
+try:
+    v_store = VectorStore(store.data_dir)
+except Exception as e:
+    logger.warning("Fallo al inicializar VectorStore local: %s. Usando en memoria.", e)
+    v_store = VectorStore(in_memory=True)
 
 # ─── Aplicación FastAPI ───────────────────────────────────────────────────────
 app = FastAPI(
@@ -91,6 +103,17 @@ class ChatResponse(BaseModel):
     """Respuesta generada por el LLM."""
     query: str
     answer: str
+
+class RecommendationResult(BaseModel):
+    """Resultado individual de una película recomendada."""
+    doc_id: int
+    title: str
+    year: str
+    director: str
+    genres: List[str]
+    similarity: float
+    cosine_similarity: float
+    metadata_similarity: float
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
@@ -214,3 +237,27 @@ async def chat(request: ChatRequest):
         retrieved_docs=[r.model_dump() for r in request.results]
     )
     return ChatResponse(query=request.query, answer=answer)
+
+@app.get("/recommend", response_model=List[RecommendationResult], summary="Recomendar películas similares", tags=["Recomendación"])
+async def get_recommendations(doc_id: int, top_k: int = 5):
+    """
+    Retorna las películas más similares a la indicada por `doc_id`.
+    Utiliza un modelo híbrido basado en contenido (VSM sobre TF-IDF + similitud estructurada Jaccard).
+    """
+    # Validar si el documento semilla existe
+    film = store.get_film(doc_id)
+    if not film:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Película con doc_id {doc_id} no encontrada en la base de datos local."
+        )
+    
+    try:
+        recommendations = recommender.recommend(doc_id, top_k=top_k)
+        return recommendations
+    except Exception as e:
+        logger.error("Error al generar recomendaciones para doc_id %d: %s", doc_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno al procesar las recomendaciones: {str(e)}"
+        )
