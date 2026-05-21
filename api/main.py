@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+import re
 from database.store import DocumentStore
 from indexer.inverted_index import InvertedIndex
 from indexer.ebm import ExtendedBooleanModel
@@ -14,6 +15,16 @@ from api.rag import rag_manager
 from crawler.web_search import web_searcher
 from database.vector_store import VectorStore
 from indexer.recommender import MovieRecommender
+
+# ─── Query Parser ─────────────────────────────────────────────────────────────
+def extract_metadata_from_query(query: str) -> dict:
+    """Extrae metadatos duros de la consulta (ej. años de 4 dígitos)."""
+    meta = {}
+    # Buscar años entre 1900 y 2099
+    match = re.search(r'\b(19|20)\d{2}\b', query)
+    if match:
+        meta['year'] = int(match.group(0))
+    return meta
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -71,6 +82,8 @@ class SearchRequest(BaseModel):
     p: float = Field(default=2.0, ge=1.0, description="Exponente para la p-norma del modelo EBM.")
     ebm_weight: float = Field(default=0.6, ge=0.0, le=1.0, description="Peso del score booleano (0-1).")
     vector_weight: float = Field(default=0.4, ge=0.0, le=1.0, description="Peso del score semántico (0-1).")
+    pop_weight: float = Field(default=0.1, ge=0.0, le=1.0, description="Peso de la popularidad (0-1).")
+    fresh_weight: float = Field(default=0.05, ge=0.0, le=1.0, description="Peso de la frescura (0-1).")
 
 class SearchResult(BaseModel):
     """Representación de un resultado individual de búsqueda."""
@@ -159,20 +172,33 @@ async def search(request: SearchRequest):
         film = store.get_film(doc_id)
         if not film: 
             continue
+            
+        # --- HARD METADATA FILTER ---
+        extracted_meta = extract_metadata_from_query(query)
+        target_year = extracted_meta.get('year')
+        
+        if target_year is not None:
+            film_year = film.get("year")
+            try:
+                # Si el año no coincide, filtramos estrictamente
+                if int(film_year) != target_year:
+                    continue
+            except (ValueError, TypeError):
+                continue # Si la película no tiene un año válido y se requiere uno
         
         # --- POSICIONAMIENTO AVANZADO (Corte 3) ---
         # 1. Factor Popularidad (Normalizado de 0 a 1, asumiendo max ~100)
         pop = float(film.get("popularity", 0))
-        pop_factor = min(1.0, pop / 100.0) * 0.1 # Pesa un 10%
+        pop_factor = min(1.0, pop / 100.0) * request.pop_weight
         
         # 2. Factor Frescura (Más recientes arriba)
         try:
             f_year = int(film.get("year", 0))
-            fresh_factor = max(0, 1.0 - (current_year - f_year) / 50.0) * 0.05 # Pesa un 5%
+            fresh_factor = max(0, 1.0 - (current_year - f_year) / 50.0) * request.fresh_weight
         except:
             fresh_factor = 0
             
-        final_score = s_ebm + pop_factor + fresh_factor
+        final_score = (s_ebm * request.ebm_weight) + pop_factor + fresh_factor
         
         # Generación de Snippet inteligente
         text = film.get("rich_text", "") or film.get("synopsis", "")
