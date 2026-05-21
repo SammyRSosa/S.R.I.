@@ -47,6 +47,21 @@ def chunk_text(text: str, chunk_size: int = 600, overlap: int = 120) -> List[str
         start += chunk_size - overlap
     return chunks
 
+def generate_smart_snippet(text: str, query: str) -> str:
+    """Genera un fragmento de texto centrado en las palabras clave de la consulta."""
+    text_lower = text.lower()
+    tokens = [t.lower() for t in query.split() if len(t) > 3]
+    
+    snippet = text[:200] + "..."
+    for t in tokens:
+        idx = text_lower.find(t)
+        if idx != -1:
+            start = max(0, idx - 80)
+            end = min(len(text), idx + 160)
+            snippet = ("..." if start > 0 else "") + text[start:end].strip() + "..."
+            break
+    return snippet
+
 def fetch_url(url: str, title: str) -> Optional[Dict[str, Any]]:
     """Descarga una URL y devuelve su contenido limpio."""
     try:
@@ -158,7 +173,7 @@ class WebSearchModule:
                     "score": round(score, 4),
                     "ebm_score": 0.0,
                     "vector_score": round(score, 4),
-                    "snippet": f"{matching_chunk['text']}... (Fuente: {matching_chunk['url']})",
+                    "snippet": f"{generate_smart_snippet(matching_chunk['text'], query)} (Fuente: {matching_chunk['url']})",
                     "is_web_result": True
                 })
                 

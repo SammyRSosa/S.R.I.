@@ -37,7 +37,7 @@ class VectorStore:
     
     VECTOR_FILE = "faiss_index.bin"
     MAPPING_FILE = "vector_mapping.json"
-    DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+    DEFAULT_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     TEXT_LIMIT = 2000 # Límite de caracteres para evitar truncamiento excesivo
     
     def __init__(self, data_dir: str | Path | None = DEFAULT_DATA_DIR, model_name: str = DEFAULT_MODEL, in_memory: bool = False) -> None:

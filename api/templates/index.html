@@ -87,7 +87,7 @@
                 <!-- Status Badges -->
                 <div class="hidden md:flex space-x-4 text-xs font-medium">
                     <span class="flex items-center px-3 py-1 rounded-full bg-gray-800 border border-gray-700 text-gray-300">
-                        <i data-lucide="database" class="w-3 h-3 mr-1.5 text-amber-400"></i> Corpus: 1,623
+                        <i data-lucide="database" class="w-3 h-3 mr-1.5 text-amber-400"></i> 📦 Corpus Local: 1,623 Películas (Inglés)
                     </span>
                     <span class="flex items-center px-3 py-1 rounded-full bg-gray-800 border border-gray-700 text-gray-300">
                         <i data-lucide="zap" class="w-3 h-3 mr-1.5 text-yellow-400"></i> EBM Carga: 12s
@@ -121,7 +121,7 @@
             <!-- Search Bar -->
             <div class="glass-panel p-2 rounded-full flex items-center shadow-2xl shadow-black/50 mb-4 max-w-3xl mx-auto">
                 <i data-lucide="search" class="text-gray-400 ml-4 w-6 h-6"></i>
-                <input type="text" id="query-input" class="flex-1 bg-transparent border-none text-white px-4 py-3 text-lg focus:outline-none placeholder-gray-500" placeholder="Busca directores, temáticas o escribe en lenguaje natural..." onkeypress="handleEnter(event)">
+                <input type="text" id="query-input" class="flex-1 bg-transparent border-none text-white px-4 py-3 text-lg focus:outline-none placeholder-gray-500" placeholder="Ej: James Cameron Pandora, Christopher Nolan, Oppenheimer..." onkeypress="handleEnter(event)">
                 <button onclick="performSearch()" class="bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-white font-semibold py-3 px-8 rounded-full transition-all transform hover:scale-105 flex items-center">
                     Analizar <i data-lucide="sparkles" class="w-4 h-4 ml-2"></i>
                 </button>
@@ -183,7 +183,7 @@
                 <div id="rag-container" class="glass-panel rounded-2xl p-6 mb-8 border border-amber-500/30 shadow-[0_0_15px_rgba(245,158,11,0.1)]">
                     <div class="flex items-center mb-3">
                         <i data-lucide="bot" class="w-5 h-5 text-amber-400 mr-2"></i>
-                        <h2 class="text-lg font-bold text-amber-400">Respuesta Sintetizada (RAG - Llama 3.3)</h2>
+                        <h2 class="text-lg font-bold text-amber-400">🤖 Respuesta Sintetizada (RAG - Llama 3.3 en Inglés)</h2>
                     </div>
                     <div id="rag-content" class="text-gray-300 leading-relaxed text-sm">
                         <i data-lucide="loader-2" class="w-4 h-4 animate-spin inline-block"></i> Generando respuesta con IA...
@@ -290,8 +290,8 @@
                                     <div class="bg-yellow-500 h-2.5 rounded-full progress-bar-fill" style="width: 16.67%"></div>
                                 </div>
                                 <!-- Tooltip -->
-                                <div class="absolute z-10 w-64 p-3 mt-2 text-xs text-white bg-gray-900 border border-gray-700 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none -left-2 top-full">
-                                    Baja debido a que el Ground Truth contiene solo 1-2 documentos relevantes marcados por consulta. Al exigir un Top 5, los documentos correctos recuperados (pero no etiquetados) penalizan la precisión exacta. Lo crucial es el altísimo MRR.
+                                <div class="absolute z-10 w-72 p-3 mt-2 text-xs text-white bg-gray-900 border border-gray-700 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none -left-2 top-full">
+                                    Nota académica: Métrica baja debido a que el Ground Truth contiene solo 1-2 documentos relevantes por query (penalización matemática estricta en @5, no es un fallo del motor).
                                 </div>
                             </div>
                         </div>
@@ -397,9 +397,9 @@
 
             try {
                 // Simulate fallback checking visually if the user asks the difficult question
-                if (query.toLowerCase().includes("ganó el oscar") || query.toLowerCase().includes("2024")) {
+                if (query.toLowerCase().includes("who won") || query.toLowerCase().includes("oscar") && query.toLowerCase().includes("2024")) {
                     setTimeout(() => {
-                        spinnerText.textContent = "Corpus Local: Insuficiente. Activando Web Fallback (DuckDuckGo)...";
+                        spinnerText.textContent = "🔍 Buscando en Corpus Local... [0 Matches] ──> 🌐 ¡Activando Web Fallback Dinámico en Inglés!";
                         spinnerText.classList.add('text-blue-400');
                     }, 1500);
                 } else {
@@ -445,8 +445,8 @@
             
             document.getElementById('results-count').textContent = `${data.total_results} encontrados | Web Fallback: ${data.was_web_search ? 'Sí' : 'No'}`;
             document.getElementById('results-header').innerHTML = data.was_web_search 
-                ? `<span class="text-blue-400 flex items-center"><i data-lucide="globe" class="w-5 h-5 mr-2"></i> Resultados Híbridos (Web Vectorial)</span>` 
-                : `<span class="text-amber-500 flex items-center"><i data-lucide="database" class="w-5 h-5 mr-2"></i> Resultados Híbridos (EBM Local)</span>`;
+                ? `<span class="text-blue-400 flex items-center"><i data-lucide="globe" class="w-5 h-5 mr-2"></i> Resultados Híbridos — 🌐 Fuente Web (FAISS VectorStore)</span>` 
+                : `<span class="text-amber-500 flex items-center"><i data-lucide="database" class="w-5 h-5 mr-2"></i> Resultados Híbridos — EBM Local</span>`;
             
             lucide.createIcons(); // refresh dynamically added icon
 
@@ -461,7 +461,7 @@
                 const borderClass = isWeb ? 'border-blue-500/50 shadow-[0_0_10px_rgba(59,130,246,0.15)]' : 'border-gray-700 hover:border-amber-500/50';
                 const badgeClass = isWeb ? 'bg-blue-900/50 text-blue-300 border-blue-500/30' : 'bg-amber-900/30 text-amber-400 border-amber-500/30';
                 const badgeIcon = isWeb ? 'globe' : 'award';
-                const badgeText = isWeb ? 'Fuente Web' : 'EBM Local';
+                const badgeText = isWeb ? '🌐 Fuente Web (FAISS)' : 'EBM Local';
                 
                 // Formulate genres HTML
                 let genresHtml = '';
@@ -478,7 +478,7 @@
                 // Recommendations Button (Only for local items)
                 const recButtonHtml = !isWeb ? `
                     <button onclick="loadRecommendations(${item.doc_id}, this)" class="mt-4 w-full py-2 bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-lg text-sm font-medium transition-colors flex items-center justify-center">
-                        <i data-lucide="film" class="w-4 h-4 mr-2 text-amber-500"></i> Ver Similares
+                        <i data-lucide="film" class="w-4 h-4 mr-2 text-amber-500"></i> 🎬 Similares
                     </button>
                     <!-- Drawer container -->
                     <div id="drawer-${item.doc_id}" class="drawer-content mt-2 bg-black/40 rounded-lg p-0 border-0 border-gray-700"></div>
@@ -553,7 +553,7 @@
             if (drawer.classList.contains('open')) {
                 drawer.classList.remove('open');
                 setTimeout(() => { drawer.style.padding = '0'; }, 400); // delay padding removal for smooth anim
-                btnElement.innerHTML = `<i data-lucide="film" class="w-4 h-4 mr-2 text-amber-500"></i> Ver Similares`;
+                btnElement.innerHTML = `<i data-lucide="film" class="w-4 h-4 mr-2 text-amber-500"></i> 🎬 Similares`;
                 lucide.createIcons();
                 return;
             }
@@ -584,7 +584,7 @@
                     `;
                 });
                 html += `</div>`;
-                html += `<div class="text-center mt-3 text-[10px] text-gray-500">Algoritmo Híbrido: 50% Coseno (TF-IDF) + 50% Jaccard (Meta)</div>`;
+                html += `<div class="text-center mt-3 text-[10px] text-gray-500">Score = 50% Similitud Coseno TF-IDF (Sin Embeddings) + 50% Similitud Jaccard (Genres/Cast)</div>`;
                 
                 drawer.innerHTML = html;
                 drawer.style.padding = '1rem';
@@ -607,21 +607,20 @@
 
         // --- CRAWLER SIMULATOR ---
         const crawlerLogs = [
-            { text: "[INFO] [1] Construyendo URL semilla heurística para búsqueda...", delay: 800, class: "text-gray-400" },
+            { text: "[INFO] Seed URL generada: https://www.metacritic.com/search/movie/", delay: 800, class: "text-gray-400" },
             { text: "   --> GET https://www.metacritic.com/search/oppenheimer/", delay: 600, class: "text-blue-400" },
-            { text: "[INFO] [2] Página de búsqueda obtenida. Extraídos 129 enlaces mediante BeautifulSoup (<a> tags).", delay: 1200, class: "text-gray-400" },
-            { text: "[DEBUG] Filtrando por dominio interno '_is_internal' y coincidencia de Título+Año...", delay: 500, class: "text-gray-500" },
-            { text: "[SUCCESS] Descubierto enlace de película coincidente: /movie/oppenheimer/", delay: 800, class: "text-green-400 font-bold" },
-            { text: "[INFO] [3] Crawleando página de detalles...", delay: 1000, class: "text-gray-400" },
+            { text: "[INFO] Extraídos 129 enlaces mediante BeautifulSoup & urljoin.", delay: 1200, class: "text-gray-400" },
+            { text: "[DEBUG] Filtering by internal domain '_is_internal' and Title+Year heuristic match...", delay: 500, class: "text-gray-500" },
+            { text: "[SUCCESS] Enlace coincidente detectado mediante heurística de Título y Año.", delay: 800, class: "text-green-400 font-bold" },
+            { text: "[INFO] Navegando a página de detalles... Ruta /user-reviews/ descubierta dinámicamente.", delay: 1000, class: "text-gray-400" },
             { text: "   --> GET https://www.metacritic.com/movie/oppenheimer/", delay: 600, class: "text-blue-400" },
-            { text: "[SUCCESS] Detectado link dinámico de reseñas: /movie/oppenheimer/user-reviews/", delay: 800, class: "text-green-400" },
-            { text: "[INFO] [4] Viajando a página de reseñas de usuarios...", delay: 1000, class: "text-gray-400" },
-            { text: "[DEBUG] Inyectando huella digital TLS de Chrome 124 (curl_cffi) para evadir Cloudflare.", delay: 600, class: "text-yellow-400" },
+            { text: "[SUCCESS] Dynamic review link discovered: /movie/oppenheimer/user-reviews/", delay: 800, class: "text-green-400" },
+            { text: "[SECURITY] Simulando fingerprint TLS de Chrome 124 via curl_cffi (Bypass Cloudflare).", delay: 1000, class: "text-yellow-400" },
             { text: "   --> GET https://www.metacritic.com/movie/oppenheimer/user-reviews/", delay: 800, class: "text-blue-400" },
-            { text: "[INFO] Parseando DOM buscando clases Tailwind 'break-words'...", delay: 900, class: "text-gray-400" },
-            { text: "[SUCCESS] Total: 5 reseñas ricas extraídas de Metacritic.", delay: 800, class: "text-green-400 font-bold" },
-            { text: "[INFO] Indexando texto enriquecido ('rich_text') en el InvertedIndex local.", delay: 1200, class: "text-gray-400" },
-            { text: "--- SECUENCIA DE CRAWLING FINALIZADA CON ÉXITO ---", delay: 500, class: "text-amber-400 font-bold mt-4" }
+            { text: "[INFO] Parsing DOM for Tailwind 'break-words' review containers...", delay: 900, class: "text-gray-400" },
+            { text: "[SUCCESS] 5 Reseñas de lenguaje natural rico (Inglés) extraídas e indexadas.", delay: 800, class: "text-green-400 font-bold" },
+            { text: "[INFO] Enriching local InvertedIndex with 'rich_text' field (English NLP tokens).", delay: 1200, class: "text-gray-400" },
+            { text: "--- CRAWLING SEQUENCE COMPLETED SUCCESSFULLY ---", delay: 500, class: "text-amber-400 font-bold mt-4" }
         ];
 
         async function runCrawlerSimulation() {

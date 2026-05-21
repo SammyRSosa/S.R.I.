@@ -158,17 +158,38 @@ async def search(request: SearchRequest):
     query = request.query
     ebm.p = request.p
     
-    # 1. Búsqueda EBM (Lógica Booleana Suave)
-    ebm_results = ebm.search(query, op="OR")
+    # --- QUERY TRANSLATION ---
+    translated_query = rag_manager.translate_query_for_ebm(query)
     
-    # 2. Construcción de resultados locales y cálculo de score combinado
+    # 1. Búsqueda EBM (Lógica Booleana Suave) - Usando Query Traducida
+    ebm_results = ebm.search(translated_query, op="OR")
+    
+    # 2. Búsqueda Semántica Vectorial (FAISS Local) - Usando Query Original
+    vec_results = v_store.search(query, top_k=100) if v_store.index and v_store.index.ntotal > 0 else []
+    
+    # --- FUSIÓN HÍBRIDA: RECIPROCAL RANK FUSION (RRF) ---
+    # RRF formula: 1 / (k + rank) donde k es típicamente 60
+    k_rrf = 60
+    
+    # Convertir resultados a diccionarios de rangos (rank empieza en 1)
+    ebm_ranks = {doc_id: rank for rank, (doc_id, _) in enumerate(ebm_results, 1)}
+    vec_ranks = {doc_id: rank for rank, (doc_id, _) in enumerate(vec_results, 1)}
+    
+    # Diccionarios para scores crudos (para mostrar en la UI)
+    ebm_scores_map = {doc_id: score for doc_id, score in ebm_results}
+    vec_scores_map = {doc_id: score for doc_id, score in vec_results}
+    
+    # Unir todos los IDs de documentos recuperados por ambos motores
+    all_doc_ids = set(ebm_ranks.keys()) | set(vec_ranks.keys())
+    
+    # 3. Construcción de resultados locales y cálculo de score RRF combinado
     combined = []
     
     # Obtener el año actual para cálculo de frescura
     from datetime import datetime
     current_year = datetime.now().year
 
-    for doc_id, s_ebm in ebm_results:
+    for doc_id in all_doc_ids:
         film = store.get_film(doc_id)
         if not film: 
             continue
@@ -186,6 +207,20 @@ async def search(request: SearchRequest):
             except (ValueError, TypeError):
                 continue # Si la película no tiene un año válido y se requiere uno
         
+        # Cálculo RRF
+        rank_ebm = ebm_ranks.get(doc_id, 1000) # Si no está, penalizar rango
+        rank_vec = vec_ranks.get(doc_id, 1000)
+        
+        rrf_ebm = 1.0 / (k_rrf + rank_ebm)
+        rrf_vec = 1.0 / (k_rrf + rank_vec)
+        
+        # Obtener scores crudos para la UI
+        s_ebm = ebm_scores_map.get(doc_id, 0.0)
+        s_vec = vec_scores_map.get(doc_id, 0.0)
+        
+        # Score Base (RRF Ponderado) -> RRF produce números pequeños, escalamos artificialmente para la UI
+        base_score = ((rrf_ebm * request.ebm_weight) + (rrf_vec * request.vector_weight)) * 100.0
+
         # --- POSICIONAMIENTO AVANZADO (Corte 3) ---
         # 1. Factor Popularidad (Normalizado de 0 a 1, asumiendo max ~100)
         pop = float(film.get("popularity", 0))
@@ -198,11 +233,11 @@ async def search(request: SearchRequest):
         except:
             fresh_factor = 0
             
-        final_score = (s_ebm * request.ebm_weight) + pop_factor + fresh_factor
+        final_score = base_score + pop_factor + fresh_factor
         
-        # Generación de Snippet inteligente
+        # Generación de Snippet inteligente (Usando translated_query para encontrar tokens en el texto local en inglés)
         text = film.get("rich_text", "") or film.get("synopsis", "")
-        tokens = idx._tokenize(query)
+        tokens = idx._tokenize(translated_query)
         snippet = text[:200] + "..."
         for t in tokens:
             idx_t = text.lower().find(t)
@@ -218,7 +253,7 @@ async def search(request: SearchRequest):
             year=str(film.get("year", "N/A")),
             score=round(final_score, 4),
             ebm_score=round(s_ebm, 4),
-            vector_score=0.0,  # 100% EBM local
+            vector_score=round(s_vec, 4),
             snippet=snippet,
             director=film.get("director", "N/A"),
             cast=film.get("cast", []),

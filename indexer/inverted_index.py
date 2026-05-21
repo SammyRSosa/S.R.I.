@@ -114,6 +114,14 @@ class InvertedIndex:
             en_stops = set(stopwords.words("english"))
             es_stops = set(stopwords.words("spanish"))
             combined = en_stops | es_stops
+        
+        # Lista negra cinematográfica (Términos que generan ruido conceptual)
+        cine_stopwords = {
+            "historia", "película", "pelicula", "director", "cine", 
+            "trama", "argumento", "personaje", "actor", "actriz", 
+            "amor", "movie", "film", "story", "character", "director", "cinema"
+        }
+        combined.update(cine_stopwords)
         return frozenset(combined)
 
     # ─── Tokenización y Normalización ─────────────────────────────────────────

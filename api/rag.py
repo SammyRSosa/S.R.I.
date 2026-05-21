@@ -26,6 +26,7 @@ REGLAS DE RESPUESTA:
 3. Cita siempre los títulos de las películas y el año cuando menciones datos extraídos de ellas.
 4. Mantén un tono profesional, apasionado por el cine y servicial.
 5. Responde en el mismo idioma en el que el usuario te pregunte.
+6. REGLA DE ORO: Si los documentos recuperados no mencionan la respuesta, o no coinciden con los criterios exactos solicitados por el usuario (ej. un año específico), DEBES responder obligatoriamente: "No se encontraron resultados relevantes en la base de datos para los criterios especificados." Bajo NINGUNA circunstancia uses tu conocimiento previo para inventar o adivinar una respuesta.
 
 CONTEXTO DE PELÍCULAS RECUPERADAS:
 {context}
@@ -62,8 +63,31 @@ CONTEXTO DE PELÍCULAS RECUPERADAS:
             )
             context_blocks.append(block)
 
-        
         return "\n".join(context_blocks)
+
+    def translate_query_for_ebm(self, query: str) -> str:
+        """Traduce una consulta al inglés de forma ultra-rápida para mejorar el recall del motor léxico."""
+        if not self.client:
+            return query
+            
+        prompt = "You are a specialized search translator. Translate the user's Spanish movie search query into English. Output ONLY the English translation, no quotes, no explanations."
+        
+        try:
+            res = self.client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": query}
+                ],
+                model=self.model,
+                temperature=0.0,
+                max_tokens=30,
+            )
+            translated = res.choices[0].message.content.strip()
+            logger.info(f"Traducción EBM: '{query}' -> '{translated}'")
+            return translated
+        except Exception as e:
+            logger.error(f"Error en traducción de query: {e}")
+            return query
 
     def generate_response(self, query: str, retrieved_docs: List[Dict[str, Any]]) -> str:
         """
