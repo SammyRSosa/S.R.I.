@@ -1,40 +1,70 @@
 """
 database/store.py
-Almacenamiento Documental — Oscar Insight Search (SRI 2025-2026)
+Document Storage Engine & Direct Serialization System.
 
-Gestiona la persistencia del corpus (películas) y del índice invertido
-usando archivos JSON simples — sin dependencias externas.
+=======================================================================================================
+                        MATHEMATICAL AND ARCHITECTURAL CORE OF THE DOCUMENT STORE
+=======================================================================================================
 
-Nuevo esquema de documento (v2):
-    {
-        "title":    str,
-        "year":     str,
-        "metadata": {
-            "director":           str,
-            "cast":               list[str],
-            "genres":             list[str],
-            "budget":             int,
-            "revenue":            int,
-            "vote_average":       float,
-            "vote_count":         int,
-            "original_language":  str,
-            "imdb_id":            str,
-            "tmdb_id":            int,
-            "source_url":         str,
-            "letterboxd_url":     str,
-            "tagline":            str,
-        },
-        "rich_text":      str,   # title + genres + director + cast + overview + reviews
-        "reviews_count":  int,
-    }
+This module serves as the primary persistence layer for the unstructured/semi-structured corpus and
+the inverted index using high-performance, single-file JSON serialization structures.
 
-Compatibilidad con esquema v1 (Wikipedia/Letterboxd):
-    Si el documento tiene "synopsis" en lugar de "rich_text", se adapta
-    automáticamente en el getter.
+1. Mathematical Document Mapping & Deduplication Formalism
+-----------------------------------------------------------
+Let $D$ be the database corpus represented as a set of documents:
+    $$D = \{ d_0, d_1, ..., d_{N-1} \}$$
+Each document $d_j \in D$ is characterized by a set of schema properties.
+To ensure perfect uniqueness of records under automated scraping and crawling, we construct 
+two distinct bijective mapping indices that operate as O(1) deduplication filters:
 
-Archivos generados:
-    data/documents.json   → persistencia de documentos
-    data/index.json       → índice invertido serializado
+  A. TMDB Unique Identifier Mapping:
+     Let $\mathcal{K}_{TMDB} \subset \mathbb{N}$ be the set of valid TMDB database keys. 
+     We define a unique lookup function $M_{TMDB}$:
+         $$M_{TMDB}: \mathcal{K}_{TMDB} \to [0, N-1]$$
+         $$M_{TMDB}(\text{tmdb\_id}) = doc\_id$$
+
+  B. Fallback Resource URL Mapping:
+     Let $\mathcal{S}_{URL}$ be the infinite set of valid web URLs. 
+     We define a fallback string identifier lookup function $M_{URL}$:
+         $$M_{URL}: \mathcal{S}_{URL} \to [0, N-1]$$
+         $$M_{URL}(\text{source\_url}) = doc\_id$$
+
+If a candidate document $d_{cand}$ with key parameters $(\text{tmdb\_id}, \text{source\_url})$ is parsed, 
+the insertion function $\text{AddFilm}(d_{cand})$ resolves the target ID as:
+    $$\text{ID}_{resolved} = \begin{cases} 
+      M_{TMDB}(\text{tmdb\_id}) & \text{if } \text{tmdb\_id} \in \text{Domain}(M_{TMDB}) \\
+      M_{URL}(\text{source\_url}) & \text{if } \text{source\_url} \in \text{Domain}(M_{URL}) \\
+      N_{next} & \text{otherwise (allocate new index)}
+    \end{cases}$$
+
+2. Document Schema Formats (Adapter Pattern)
+--------------------------------------------
+The DocumentStore implements a structural Adapter Pattern to reconcile differences between legacy (v1) 
+and modernized TMDB-enriched (v2) schemas:
+
+  - Document Schema v1 (Legacy Wikipedia/Letterboxd):
+    $$d_j^{v1} = \langle \text{title}, \text{year}, \text{synopsis}, \text{director}, \text{genre}, \text{reviews} \rangle$$
+    
+  - Document Schema v2 (Structural TMDB Rich Text):
+    $$d_j^{v2} = \langle \text{title}, \text{year}, \text{metadata}, \text{rich\_text}, \text{reviews\_count} \rangle$$
+    where:
+    $$\text{metadata} = \langle \text{director}, \text{cast}, \text{genres}, \text{budget}, \text{revenue}, \text{vote\_average}, \text{vote\_count}, \text{imdb\_id}, \text{tmdb\_id}, \text{source\_url} \rangle$$
+
+For downstream indices (Extended Boolean Model, Vector Space Model), the indexable text representation 
+$R(d_j)$ is dynamically adapted inside `get_rich_text(doc_id)`:
+    $$R(d_j) = \begin{cases} 
+      d_j^{v2}.\text{rich\_text} & \text{if } d_j \text{ is } v2 \\
+      d_j^{v1}.\text{title} \oplus d_j^{v1}.\text{synopsis} \oplus d_j^{v1}.\text{director} \oplus d_j^{v1}.\text{genre} \oplus \bigoplus_{r \in \text{reviews}} r & \text{if } d_j \text{ is } v1 
+    \end{cases}$$
+where $\oplus$ represents string concatenation with a space delimiter.
+
+3. Serialization Flow Chart
+---------------------------
+  [In-Memory Data Structures] ─── (save()) ───> [Path/documents.json] (Disk JSON UTF-8)
+             │
+             ├─── (save_index()) ───> [Path/index.json] (Serialized Posting Lists)
+             │
+             └─── (load()) <─── [Path/documents.json] (Disk Read on Bootstrap)
 """
 
 from __future__ import annotations
@@ -92,17 +122,27 @@ class DocumentStore:
 
     def add_film(self, film_data: dict) -> int:
         """
-        Añade una película al store. Retorna el doc_id (nuevo o existente).
-
-        Deduplicación:
-          1. Por `metadata.tmdb_id` (v2 schema)
-          2. Por `source_url` (v1 schema y fallback)
-
-        Args:
-            film_data: Diccionario con el esquema v1 o v2.
-
-        Returns:
-            doc_id asignado (int).
+        INSERTION AND DEDUPLICATION ALGORITHM
+        =====================================
+        Inserts a movie document into the database while maintaining uniqueness constraints.
+        
+        1. TMDB ID Search ($M_{TMDB}$):
+           Checks if `tmdb_id` exists in the in-memory primary key lookup table:
+           $$\text{tmdb\_id} \in \text{Keys}(\text{self.\_tmdb\_id\_index})$$
+           If true, returns the existing $doc\_id$ to prevent duplicates.
+           
+        2. Source URL Fallback ($M_{URL}$):
+           If TMDB search fails, checks if `source_url` exists in the secondary index:
+           $$\text{source\_url} \in \text{Keys}(\text{self.\_url\_index})$$
+           If true, returns the existing $doc\_id$.
+           
+        3. Document Allocation ($N_{next}$):
+           If both lookups fail, allocates:
+           $$doc\_id = \text{self.\_next\_id}$$
+           $$\text{self.\_next\_id} \leftarrow \text{self.\_next\_id} + 1$$
+           Then updates mapping indexes:
+           $$\text{self.\_tmdb\_id\_index}[\text{tmdb\_id}] = doc\_id$$
+           $$\text{self.\_url\_index}[\text{source\_url}] = doc\_id$$
         """
         # ── Deduplicación por tmdb_id ──────────────────────────────────────
         tmdb_id: Optional[int] = None
@@ -150,20 +190,36 @@ class DocumentStore:
     # ─── Consulta ─────────────────────────────────────────────────────────────
 
     def get_film(self, doc_id: int) -> Optional[dict]:
-        """Retorna el documento con el doc_id dado, o None si no existe."""
+        """
+        DOCUMENT RETRIEVAL BY UNIQUE PRIMARY ID
+        =======================================
+        Performs an exact lookup on the in-memory documents dictionary:
+        $$\text{GetFilm}(j) = d_j \in D \cup \{\text{None}\}$$
+        Complexity: $O(1)$ average time complexity.
+        """
         return self.documents.get(doc_id)
 
     def all_films(self) -> list[dict]:
-        """Retorna todos los documentos como lista con 'doc_id' incluido."""
+        """
+        CORPUS TRANSFORMATION TO LIST REPRESENTATION
+        ============================================
+        Converts the in-memory mapping to a sequential array, injecting the `doc_id` inside each dictionary:
+        $$\text{AllFilms}(D) = \left[ \{ \text{"doc\_id"}: j \} \cup d_j \;\middle|\; j \in [0, N-1] \right]$$
+        """
         return [{"doc_id": k, **v} for k, v in self.documents.items()]
 
     def get_rich_text(self, doc_id: int) -> str:
         """
-        Retorna el texto indexable del documento.
-
-        Compatible con ambos esquemas:
-          - v2: devuelve `rich_text`
-          - v1: construye desde title + synopsis + reviews
+        DYNAMIC SCHEMATIC TEXT CONCATENATION ADAPTER
+        ============================================
+        Resolves schematic structural variations by dynamically extracting or synthesizing 
+        indexable representations $R(d_j)$ for terms tokenization.
+        
+        Formula:
+          $$R(d_j) = \begin{cases} 
+            d_j^{v2}.\text{rich\_text} & \text{if } \text{"rich\_text"} \in d_j \\
+            d_j^{v1}.\text{title} \oplus d_j^{v1}.\text{synopsis} \oplus d_j^{v1}.\text{director} \oplus d_j^{v1}.\text{genre} \oplus \bigoplus_{r \in \text{reviews}} r & \text{otherwise}
+          \end{cases}$$
         """
         film = self.documents.get(doc_id, {})
         if not film:
@@ -185,7 +241,13 @@ class DocumentStore:
     # ─── Índice invertido ─────────────────────────────────────────────────────
 
     def save_index(self, index: dict[str, list[tuple[int, int]]]) -> None:
-        """Persiste el índice invertido en data/index.json."""
+        """
+        INVERTED INDEX PERMANENT PERSISTENCE
+        ====================================
+        Serializes term postings to an UTF-8 raw JSON index file.
+        Let $t$ be a term, and $P_t = [ (d_1, tf_1), (d_2, tf_2), ... ]$ be its posting list.
+        Saves the posting map $T \to P_t$ onto the local storage.
+        """
         path = self.data_dir / self.INDEX_FILE
         serializable = {term: list(postings) for term, postings in index.items()}
         with open(path, "w", encoding="utf-8") as f:
@@ -193,7 +255,11 @@ class DocumentStore:
         logger.info("Índice guardado: %s (%d términos)", path, len(index))
 
     def load_index(self) -> dict[str, list[tuple[int, int]]]:
-        """Carga el índice invertido desde data/index.json."""
+        """
+        INVERTED INDEX BOOTSTRAP DESERIALIZATION
+        ========================================
+        Loads and maps raw posting tuples $(doc\_id, tf)$ back into the index structure.
+        """
         path = self.data_dir / self.INDEX_FILE
         if not path.exists():
             return {}
@@ -204,7 +270,11 @@ class DocumentStore:
     # ─── Persistencia de documentos ───────────────────────────────────────────
 
     def save(self) -> None:
-        """Persiste los documentos en data/documents.json."""
+        """
+        CORPUS SERIALIZATION FLOW
+        =========================
+        Persists the entire document repository mapping and system metadata using structured JSON format.
+        """
         path = self.data_dir / self.DOCUMENTS_FILE
         payload = {
             "_meta": {
@@ -219,7 +289,13 @@ class DocumentStore:
         logger.info("Store guardado: %s (%d docs)", path, len(self.documents))
 
     def load(self) -> None:
-        """Carga documentos desde data/documents.json (si existe)."""
+        """
+        CORPUS DESERIALIZATION & INDEX CONSTRUCT PIPELINE
+        =================================================
+        Loads all persisted records from the filesystem and dynamically rebuilds the deduplication indices:
+        $$M_{TMDB}: ID_{tmdb} \to doc\_id$$
+        $$M_{URL}: URL_{source} \to doc\_id$$
+        """
         path = self.data_dir / self.DOCUMENTS_FILE
         if not path.exists():
             return

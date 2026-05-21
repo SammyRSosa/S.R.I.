@@ -1,18 +1,61 @@
 """
 crawler/web_search.py
-Módulo de Búsqueda Web Fallback con Crawler Persistente (Corte 3).
+Módulo de Búsqueda Web Fallback con Crawler Persistente y Vectorización Temporal.
 
-Pipeline:
-  1. Busca en DuckDuckGo las URLs más relevantes para la consulta.
-  2. Descarga las páginas en paralelo y extrae texto limpio.
-  3. PERSISTE las páginas crawleadas en el DocumentStore local
-     para enriquecer el corpus de forma orgánica ("Crawler Heurístico").
-  4. Construye un VectorStore temporal de FAISS en memoria para
-     realizar búsqueda semántica inmediata sobre el contenido descargado.
+=======================================================================================================
+                        MATHEMATICAL AND ALGORITHMIC FORMALISMS OF WEB SEARCH & CRAWL
+=======================================================================================================
 
-Así, cada búsqueda web ENRIQUECE permanentemente el corpus local.
-La próxima vez que alguien pregunte algo similar, la respuesta ya
-estará indexada localmente sin depender de internet.
+This module implements a dynamic fallback web searching and parallel crawling pipeline designed to 
+mitigate corpus incompleteness. It bypasses conventional search engines via a direct scraper targeting
+the lightweight DuckDuckGo HTML engine, and then processes retrieved target URLs.
+
+1. Mathematical Text Chunking (Sliding Window Model)
+---------------------------------------------------
+To prevent input token saturation in downstream embedding models (e.g., SentenceTransformers), 
+raw web content is split using a sliding window chunking partitioner.
+Let $T$ be the input sequence of characters of length $|T|$.
+Given a chunk size $L_{chunk}$ and a sliding overlap $O_{overlap}$, the step size $S$ is defined as:
+    $$S = L_{chunk} - O_{overlap}$$
+The $k$-th chunk is defined by the slice of text:
+    $$C_k = T[\, k \cdot S \;\;:\;\; k \cdot S + L_{chunk} \,]$$
+where $k \in \mathbb{N}_0$ and $k \cdot S < |T|$.
+This guarantees that structural and grammatical context at boundary divisions is preserved in at least 
+one adjacent chunk block.
+
+2. Concurrent Crawling (ThreadPool Threading Model)
+---------------------------------------------------
+Let $U = \{u_1, u_2, ..., u_n\}$ be the set of valid, non-blocked URLs discovered from the search engine.
+To maximize network bandwidth utilization while staying within polite thread-pool bounds, we model 
+crawling via a Parallel Thread Pool Executor with $W$ workers.
+The concurrent latency is modeled as:
+    $$\text{Latency}_{total} = \max_{p \in [1..W]} \left( \sum_{i \in S_p} \text{RTT}(u_i) + \delta_i \right)$$
+where $S_p$ is the partition of URLs assigned to worker thread $p$, $\text{RTT}(u_i)$ is the network round-trip time, 
+and $\delta_i$ is the HTML parsing overhead.
+
+3. Temporal Vector Space Model (FAISS FlatIP Cosine Space)
+-----------------------------------------------------------
+Once page contents are downloaded, they are chunked and embedded in a temporal in-memory FAISS Vector Store.
+Let $C_1, C_2, ..., C_m$ be the text chunks. We map each chunk to a dense numerical vector using a bi-encoder 
+neural network model $\phi(C_i)$:
+    $$\mathbf{e}_i = \phi(C_i) \in \mathbb{R}^d$$
+To compute semantic similarity using the inner product efficiently, the vectors are normalized under the $L_2$ norm:
+    $$\mathbf{\hat{e}}_i = \frac{\mathbf{e}_i}{\|\mathbf{e}_i\|_2} = \frac{\mathbf{e}_i}{\sqrt{\sum_{j=1}^d e_{i,j}^2}}$$
+For a normalized query vector $\mathbf{\hat{e}}_q = \frac{\phi(Q)}{\|\phi(Q)\|_2}$, the inner product computed 
+by `faiss.IndexFlatIP` matches the mathematical cosine similarity exactly:
+    $$\text{Sim}_{cosine}(Q, C_i) = \langle \mathbf{\hat{e}}_q, \mathbf{\hat{e}}_i \rangle = \sum_{j=1}^d \hat{e}_{q,j} \cdot \hat{e}_{i,j}$$
+The temporary FAISS index performs an exact brute-force search over the $m$ temporal vectors, sorting in $O(m \cdot d)$ time.
+
+4. Algorithmic Pipeline & Data Flow
+------------------------------------
+  [User Query] ──> [Query Context Enrichment] ──> [DuckDuckGo HTML POST Request]
+                                                               │
+                                                               ▼
+  [In-Memory FAISS Retrieval] <── [L2 Norm] <── [Temporal Embeddings] <── [Filtered URL Collection]
+               │                                                      (Exclude Blocked Domains)
+               ▼                                                               │
+  [Output Top-K JSON Results] <── [DB Corpus Auto-Enrichment] <── [Thread Pool Parallel Scraping]
+                                  (Permanent Store Insertion)
 """
 
 import logging
@@ -34,7 +77,25 @@ HEADERS = {
 
 
 def extract_text_from_html(html_content: str) -> str:
-    """Extrae y limpia el texto principal de una página HTML filtrando ruido."""
+    """
+    HEURISTIC HTML TEXT PARSING AND DOM NOISE REDUCTION
+    ===================================================
+    Converts raw, structurally noisy HTML content into highly clean raw text suitable for indexation.
+    
+    1. DOM Decoupling:
+       Removes non-semantic structural nodes by matching:
+       $$E_{noise} = \{\text{script}, \text{style}, \text{nav}, \text{footer}, \text{header}, \text{aside}, \text{form}, \text{iframe}, \text{noscript}, \text{link}, \text{meta}\}$$
+       These nodes are stripped entirely from the DOM tree.
+       
+    2. Wikipedia Specific Cleaning Heuristics:
+       Wikipedia documents contain redundant layout classes that degrade TF-IDF precision. 
+       We decompose elements containing the following CSS classes:
+       $$C_{noise} = \{\text{navbox}, \text{mw-jump-link}, \text{mw-editsection}, \text{reflist}, \text{reference}, \text{sidebar}, \text{toc}, \text{catlinks}, \text{noprint}\}$$
+       
+    3. Normalization:
+       Extracts child text nodes and maps any sequence of multiple whitespace characters $\geq 1$ to a single space:
+       $$f_{clean}(T) = \text{regex\_sub}(\text{"\s+"}, \text{" "}, \text{strip}(T))$$
+    """
     soup = BeautifulSoup(html_content, "html.parser")
     # Eliminar elementos no textuales o de maquetación/UI
     for element in soup(["script", "style", "nav", "footer", "header", "aside",
@@ -51,7 +112,21 @@ def extract_text_from_html(html_content: str) -> str:
 
 
 def chunk_text(text: str, chunk_size: int = 600, overlap: int = 120) -> List[str]:
-    """Divide un texto plano en chunks con solapamiento."""
+    """
+    SLIDING WINDOW PARTITIONING ALGORITHM
+    =====================================
+    Divides an unstructured text document into overlapping blocks to maintain semantic continuity.
+    
+    Formulation:
+      Let $L_{text}$ be the string length.
+      Let $L_{chunk}$ be the chunk size in characters (default 600).
+      Let $O_{overlap}$ be the character overlap (default 120).
+      Step size: $S = L_{chunk} - O_{overlap} = 480$.
+      The set of windows $I$ is defined as:
+      $$I = \left\{ [S \cdot k, \; S \cdot k + L_{chunk}] \;\middle|\; k \in \mathbb{N}_0, \; S \cdot k < L_{text} \right\}$$
+    
+    This ensures that any phrase of length $\leq O_{overlap}$ falls fully within at least one chunk.
+    """
     chunks = []
     if not text:
         return chunks
@@ -64,7 +139,24 @@ def chunk_text(text: str, chunk_size: int = 600, overlap: int = 120) -> List[str
 
 
 def generate_smart_snippet(text: str, query: str) -> str:
-    """Genera un fragmento de texto centrado en las palabras clave de la consulta."""
+    """
+    SEMANTIC SENTINEL SNIPPET GENERATION
+    ====================================
+    Locates the most relevant slice of text matching query tokens to provide context-rich UI snippets.
+    
+    1. Term Filtering:
+       Extracts set of significant query terms $Q_{sig} = \{ t \in \text{split}(Q) \mid \text{len}(t) > 3 \}$.
+       
+    2. Exact Substring Matching:
+       For each term $t \in Q_{sig}$, finds the first matching character index $i_t$ in the text:
+       $$i_t = \text{find}(t, \text{lowercase}(T))$$
+       
+    3. Window Extraction:
+       Extracts a window of radius $R_{left} = 80$ and $R_{right} = 160$ around the match:
+       $$W = T[\max(0, i_t - 80) \;\;:\;\; \min(|T|, i_t + 160)]$$
+       
+    Returns the snippet string prepended/appended with ellipses if boundaries are truncated.
+    """
     text_lower = text.lower()
     tokens = [t.lower() for t in query.split() if len(t) > 3]
     
@@ -80,7 +172,15 @@ def generate_smart_snippet(text: str, query: str) -> str:
 
 
 def fetch_url(url: str, title: str) -> Optional[Dict[str, Any]]:
-    """Descarga una URL y devuelve su contenido limpio."""
+    """
+    HTML HTTP ACQUISITION AND CONTEXT EXTRACTION
+    ============================================
+    Downloads remote resource via standard HTTP GET with timeout constraints to avoid blocking threads.
+    
+    Network Safety:
+      - Timeout: $\tau = 8.0$ seconds.
+      - Status Verification: Returns clean parsed text only on HTTP 200.
+    """
     try:
         logger.info(f"Crawler descargando página: {url}")
         r = requests.get(url, headers=HEADERS, timeout=8.0)
@@ -96,12 +196,23 @@ def fetch_url(url: str, title: str) -> Optional[Dict[str, Any]]:
 
 def _persist_crawled_pages(crawled_pages: List[Dict[str, Any]], query: str) -> int:
     """
-    Persiste las páginas crawleadas en el DocumentStore local.
-    Solo guarda páginas con texto sustancial (>300 chars).
-    Usa source_url para deduplicación: si la URL ya fue crawleada antes, no se duplica.
+    COOPERATIVE CORPUS ENRICHMENT & DEDUPLICATION ALGORITHM
+    =======================================================
+    Persists web crawled documents permanently inside the JSON DocumentStore to expand local vocabulary.
     
-    Returns:
-        Número de documentos nuevos añadidos al corpus.
+    1. Size Filtering:
+       Only documents containing substantial text content are persisted:
+       $$|T| \geq 300\text{ characters}$$
+       
+    2. Document Formatting & Adapter Schema:
+       Formats the text into the structural Document v2 schema:
+       - Set Title: "[Crawled] {Original Title}"
+       - Extract Year: Matches $\text{regex\_search}(\text{"(19\\d{2}|20\\d{2})"})$ in Title/URL, otherwise default to "N/A"
+       - Metadata: Set genres to ["Reference", "web_crawled"] and source_url = url
+       
+    3. Deduplication Key Matching:
+       Uses `source_url` inside DocumentStore to prevent duplicate insertions:
+       $$\text{URL}_{new} \notin \text{Keys}(\text{Store.url\_index})$$
     """
     try:
         from database.store import DocumentStore
@@ -163,14 +274,20 @@ def _persist_crawled_pages(crawled_pages: List[Dict[str, Any]], query: str) -> i
         return 0
 
 
+
 class WebSearchModule:
     """
-    Módulo de búsqueda web inteligente con crawler vectorial temporal
-    y persistencia automática al DocumentStore local.
+    HEURISTIC INTELLIGENT WEB-SEARCH RETRIEVER & VECTOR FALLBACK MODULE
+    ==================================================================
+    Orchestrates the dynamic retrieval of external web resources to compensate for local corpus limits.
+    Extracted pages are structured, deduplicated, and permanently indexed into the local storage.
     
-    Cada búsqueda web enriquece permanentemente el corpus:
-    las páginas descargadas se guardan en el DocumentStore para que
-    futuras consultas similares se resuelvan localmente sin internet.
+    1. Retrieval Model:
+       Hits the direct HTML version of DuckDuckGo via HTTP POST requests to prevent library rate limits.
+       
+    2. Parallel Crawler Pipeline:
+       Crawls retrieved search pages concurrently, extracting structural sections, cleaning tags, 
+       storing in DocumentStore, and indexating temporality via FAISS indexations.
     """
 
     def __init__(self, max_results: int = 5):
@@ -178,8 +295,18 @@ class WebSearchModule:
 
     def _enrich_query(self, query: str) -> str:
         """
-        Enriquece la query para mejorar resultados de DuckDuckGo.
-        Añade contexto cinematográfico si detecta keywords relevantes.
+        QUERY CONTEXT EXPANSION HEURISTICS
+        ==================================
+        Expands the user query to steer the search engine toward academic and encyclopedic sources.
+        
+        Formula:
+          Let $Q$ be the query.
+          Let $K_{oscar} = \{\text{"oscar"}, \text{"academy"}, \text{"award"}, \text{"won"}, \text{"winner"}, \text{"best picture"}\}$
+          Let $f_{enrich}(Q)$ be:
+          $$f_{enrich}(Q) = \begin{cases} 
+            Q \cup \{\text{"Academy Awards movie film wikipedia"}\} & \text{if } \exists w \in K_{oscar} \text{ s.t. } w \in \text{lowercase}(Q) \\
+            Q \cup \{\text{"movie film"}\} & \text{otherwise}
+          \end{cases}$$
         """
         q_lower = query.lower()
         # Si la query menciona Oscar/Academy/award, añadir contexto
@@ -195,7 +322,11 @@ class WebSearchModule:
     ]
 
     def _is_relevant_url(self, url: str) -> bool:
-        """Filtra URLs de dominios claramente irrelevantes."""
+        """
+        DOMAIN RELEVANCE FILTERING
+        ==========================
+        Performs static domain filtering against blacklist rules to prevent parsing non-informative sites.
+        """
         url_lower = url.lower()
         return not any(domain in url_lower for domain in self.BLOCKED_DOMAINS)
 

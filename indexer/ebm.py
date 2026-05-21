@@ -1,8 +1,10 @@
 """
 indexer/ebm.py
-Extended Boolean Model (Corte 2)
+Extended Boolean Model (EBM) Engine (Corte 2 & 3)
 
-Calcula pesos TF-IDF normalizados y evalúa consultas mediante distancias $p$-norm.
+Mathematical and Algorithmic Core of the Hybrid Information Retrieval System.
+Provides normalized TF-IDF weight generation and soft logical evaluation using 
+multidimensional p-norm distance algorithms.
 """
 
 from __future__ import annotations
@@ -19,22 +21,64 @@ logger = logging.getLogger(__name__)
 
 class ExtendedBooleanModel:
     """
-    Implementación del Modelo Booleano Extendido (EBM) según el formalismo de 
-    p-norma propuesto por Salton, Fox y Wu (1983).
+    MATHEMATICAL FORMALISM: EXTENDED BOOLEAN MODEL (EBM) USING P-NORM ALGORITHMS
+    ===========================================================================
+    Proposed by Salton, Fox, and Wu (1983) in "Extended Boolean Information Retrieval",
+    this model bridges the gap between structured boolean logic and the vector space model (VSM).
+    It treats terms not as binary variables (0 or 1), but as coordinates in a normalized 
+    multidimensional space [0, 1]^m, where weights are determined by TF-IDF metrics.
 
-    Este modelo supera la rigidez del modelo booleano clásico permitiendo que 
-    los términos de la consulta tengan pesos (TF-IDF) y que la similitud sea 
-    una función continua en el intervalo [0, 1].
+    1. Mathematical Definitions:
+       Let d be a document, q be a query with m terms (t_1, t_2, ..., t_m), and w_{i,j} 
+       be the normalized weight of term t_i in document d_j.
+       
+       A. Query with 'OR' operator: q = (t_1 OR t_2 OR ... OR t_m)
+          In classical Boolean logic, the document is relevant if AT LEAST one term is present.
+          Geometrically, this represents distance from the worst point (0, 0, ..., 0).
+          Using the p-norm, the similarity score is:
+          
+              Sim_OR(d_j, q) = || (w_{1,j}, w_{2,j}, ..., w_{m,j}) ||_p
+                             = [ (w_{1,j}^p + w_{2,j}^p + ... + w_{m,j}^p) / m ] ^ (1/p)
 
-    Matemáticamente:
-    - Para una consulta OR: Sim(d, q) = [(w1^p + w2^p + ... + wm^p) / m]^(1/p)
-    - Para una consulta AND: Sim(d, q) = 1 - [((1-w1)^p + (1-w2)^p + ... + (1-wm)^p) / m]^(1/p)
+       B. Query with 'AND' operator: q = (t_1 AND t_2 AND ... AND t_m)
+          In classical Boolean logic, all terms must be present. Geometrically, this represents
+          proximity to the ideal point (1, 1, ..., 1).
+          The similarity score is:
+          
+              Sim_AND(d_j, q) = 1 - || (1-w_{1,j}, 1-w_{2,j}, ..., 1-w_{m,j}) ||_p
+                              = 1 - [ ((1-w_{1,j})^p + (1-w_{2,j})^p + ... + (1-w_{m,j})^p) / m ] ^ (1/p)
+
+    2. Tuning Parameter 'p' (Smoothing Factor):
+       - p = 1: The model collapses into a simple linear average (Vector Space Model behavior).
+       - p = infinity: The model collapses into classical binary Boolean logic (Strict AND / OR).
+       - 1 < p < infinity: Soft logical interpolation. Our system defaults to p = 2.0 (Euclidean distance).
+
+    3. Weighting Scheme (Normalized TF-IDF):
+       To prevent document length bias and ensure all weights lie strictly within [0, 1]:
+       
+           w_{i,j} = TF_norm_{i,j} * IDF_norm_i
+           
+           Where:
+           - TF_norm_{i,j} = tf_{i,j} / max_tf_j
+             (tf_{i,j} is the frequency of term i in doc j, max_tf_j is the maximum frequency of any term in doc j)
+           - IDF_norm_i = log_e(N / n_i) / log_e(N)
+             (N is the total number of documents in the corpus, n_i is the document frequency of term i)
+
+    ALGORITHMIC PIPELINE & FLOW CHART
+    =================================
+    [Query Entry] ──> [Normalizer & Tokenizer (NLTK)] ──> [Stems Extracted]
+                                                                  │
+                                                                  ▼
+    [EBM Sim_OR / Sim_AND] <── [Fetch Weights w_ij] <── [Candidate Search]
+              │
+              ▼
+    [Sort by Similarity Descending] ──> [Top-K Hybrid Reranking]
 
     Attributes:
-        store (DocumentStore): Referencia al almacén de documentos.
-        index (InvertedIndex): Referencia al índice invertido para tokenización.
-        p (float): Parámetro de suavizado (p=1 es modelo vectorial, p=inf es booleano puro).
-        weights (dict): Diccionario de pesos calculados {término: {doc_id: peso}}.
+        store (DocumentStore): Reference to document repository.
+        index (InvertedIndex): Reference to inverted index for term statistics and tokenization.
+        p (float): Exponent factor for p-norm calculation (controls strictness/smoothing).
+        weights (dict): In-memory nested mapping of {term: {doc_id: weight_value}}.
     """
     
     WEIGHTS_FILE = "ebm_weights.json"

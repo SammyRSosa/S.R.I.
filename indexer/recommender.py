@@ -1,10 +1,9 @@
 """
 indexer/recommender.py
-Módulo de Recomendación basado en Contenido — Oscar Insight Search (Corte 3)
+Content-Based Recommendation Engine (Corte 3)
 
-Calcula similitudes híbridas utilizando:
-1. Representación Vectorial e Inferencia Coseno sobre los pesos TF-IDF precalculados (EBM).
-2. Similitud estructurada Jaccard sobre géneros y reparto + coincidencia exacta de director.
+Calculates hybrid similarity across movies utilizing high-performance VSM cosine 
+inference over sparse EBM TF-IDF term vectors combined with structured Jaccard metadata.
 """
 
 from __future__ import annotations
@@ -19,11 +18,61 @@ logger = logging.getLogger(__name__)
 
 class MovieRecommender:
     """
-    Motor de Recomendación basado en Contenido.
-    
-    Implementa un enfoque híbrido que combina:
-    - Similitud Coseno de Espacio Vectorial (VSM) sobre las representaciones TF-IDF de reviews y sinopsis.
-    - Similitud estructurada sobre atributos clave (géneros, director y elenco).
+    MATHEMATICAL FORMALISM: HYBRID CONTENT-BASED RECOMMENDATION ALGORITHM
+    ====================================================================
+    This module implements a state-of-the-art hybrid content recommendation engine.
+    It combines non-structured textual similarities (reviews and synopsis) with
+    structured attribute matches to maximize recommendation precision.
+
+    1. Textual Vector Space Model (VSM) Cosine Similarity:
+       For a seed document d_A and a candidate d_B, their textual similarity is
+       modeled by the cosine of the angle between their high-dimensional TF-IDF vectors:
+       
+                                    d_A • d_B
+           Sim_Cosine(d_A, d_B) = ─────────────
+                                  ||d_A|| * ||d_B||
+                                  
+                                    ∑_{t ∈ (d_A ∩ d_B)} (w_{t,A} * w_{t,B})
+                                = ──────────────────────────────────────────
+                                  √(∑_{t ∈ d_A} w_{t,A}^2) * √(∑_{t ∈ d_B} w_{t,B}^2)
+
+       Algorithmic Optimization (Sparse Dot Product):
+       To prevent O(D) vector comparisons, we perform a sparse dot product. We iterate 
+       only over the terms present in the seed movie d_A, fetch their postings, and
+       accumulate scores for active intersection candidates. This reduces the complexity
+       from linear O(D) to O(Terms_A * Avg_Postings_Size).
+
+    2. Structured Metadata Jaccard Similarity:
+       Structured features are parsed and normalized into set representations, then compared
+       using the Jaccard similarity coefficient:
+       
+                                 |S_A ∩ S_B|
+           Jaccard(S_A, S_B) = ───────────────
+                                 |S_A ∪ S_B|
+
+       Our model applies distinct weighting parameters for structured attributes:
+       - Genres (50% weight): Set intersection Jaccard comparison.
+       - Director (30% weight): Exact match (binary variable: 1.0 if match, 0.0 otherwise).
+       - Cast (20% weight): Jaccard comparison of the top 5 billed actors.
+       
+       Mathematically:
+       Sim_Meta(d_A, d_B) = 0.5 * Jaccard(G_A, G_B) + 0.3 * DirMatch(dir_A, dir_b) + 0.2 * Jaccard(C_A, C_B)
+
+    3. Hybrid Integration:
+       The final recommendation metric is a linear combination of both components:
+       
+           Score_Hybrid(d_A, d_B) = 0.5 * Sim_Cosine(d_A, d_B) + 0.5 * Sim_Meta(d_A, d_B)
+
+    ALGORITHMIC FLOW DIAGRAM
+    ========================
+    [Input Seed doc_id] ──> [Fetch Sparse Weight Vector d_A] ──> [Pre-calculated L2 Norm ||d_A||]
+                                                                        │
+                                                                        ▼
+    [Rank Hybrid Top-K] <── [Linear Fusion (0.5 * Cos + 0.5 * Meta)] <── [Dot Product over Postings Intersection]
+                                                                        ▲
+                                                                        │
+                                                                 [Extract Structured Sets]
+                                                                 - Genres, Director, Top 5 Cast
     """
 
     def __init__(self, store: Any, ebm: Any) -> None:

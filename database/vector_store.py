@@ -1,9 +1,49 @@
 """
 database/vector_store.py
-Módulo de Almacenamiento Vectorial — Oscar Insight Search (Corte 2)
+Dense Vector Space Model (VSM) and Semantic Indexing Engine.
 
-Provee indexación y búsqueda semántica (vectores) utilizando FAISS
-y Sentence-Transformers.
+=======================================================================================================
+                        MATHEMATICAL AND ALGORITHMIC THEORY OF VECTOR STORE
+=======================================================================================================
+
+This module implements a state-of-the-art semantic search layer based on neural sentence embeddings 
+and approximate nearest neighbor search via Facebook AI Similarity Search (FAISS).
+
+1. Bi-Encoder Dense Embedding Model
+-----------------------------------
+Let $T$ be a given sequence of text tokens representing a document $d_j$.
+We map $T$ into a low-dimensional dense continuous vector space:
+    $$\mathbf{e}_j = \text{TransformerEncoder}(T) \in \mathbb{R}^d$$
+In our system, $d = 384$ using the pretrained `paraphrase-multilingual-MiniLM-L12-v2` model, 
+which maps multi-lingual contexts into a shared geometric space.
+
+2. L2 Vector Normalization & Cosine Similarity Identity
+-------------------------------------------------------
+Raw embeddings extracted from neural networks do not lie on a standard unit hypersphere.
+To guarantee that simple, high-performance inner products map strictly to Cosine Similarity, 
+we apply an explicit $L_2$ normalization transform:
+    $$\mathbf{\hat{e}}_j = \frac{\mathbf{e}_j}{\|\mathbf{e}_j\|_2} = \frac{\mathbf{e}_j}{\sqrt{\sum_{k=1}^d e_{j,k}^2}}$$
+After normalization, the $L_2$ norm of every vector is exactly 1:
+    $$\|\mathbf{\hat{e}}_j\|_2 = 1.0$$
+Given a query $Q$ with normalized embedding $\mathbf{\hat{e}}_q$, the Cosine Similarity 
+is defined as:
+    $$\text{Sim}_{cosine}(\mathbf{e}_q, \mathbf{e}_j) = \frac{\langle \mathbf{e}_q, \mathbf{e}_j \rangle}{\|\mathbf{e}_q\|_2 \|\mathbf{e}_j\|_2} = \langle \mathbf{\hat{e}}_q, \mathbf{\hat{e}}_j \rangle = \mathbf{\hat{e}}_q \cdot \mathbf{\hat{e}}_j$$
+Thus, by pre-normalizing all documents and query vectors, we can bypass slow division logic 
+and perform fast inner product calculations.
+
+3. FAISS Flat Inner Product Indexing (faiss.IndexFlatIP)
+---------------------------------------------------------
+FAISS operates over normalized vectors to execute brute force or approximate k-nearest neighbor retrieval:
+    $$\text{Retrieval}(Q) = \operatorname{arg\,max}_{j \in [0, N-1]}^k \left( \mathbf{\hat{e}}_q \cdot \mathbf{\hat{e}}_j \right)$$
+The inner product FLAT index (`faiss.IndexFlatIP`) guarantees 100% recall as it computes exact 
+pairwise products across all records in $O(N \cdot d)$ time.
+
+4. Two-Way Coordinate Mapper
+----------------------------
+Since FAISS operates strictly over zero-indexed integer IDs ($i \in [0, M-1]$), we maintain a bijective 
+bi-directional mapping to the document store primary IDs:
+    $$f_{map}: \text{FAISS\_ID} \leftrightarrow \text{DocumentStore\_ID}$$
+This mapping is persisted as a JSON dictionary mapping strings to integers.
 """
 
 from __future__ import annotations
@@ -42,12 +82,26 @@ class VectorStore:
     
     def __init__(self, data_dir: str | Path | None = DEFAULT_DATA_DIR, model_name: str = DEFAULT_MODEL, in_memory: bool = False) -> None:
         """
-        Inicializa el almacén vectorial.
+        Inicializa el almacén vectorial dense.
+        
+        Mathematical Initialization & Setup:
+        1. Dimension Allocation:
+           $$d = \text{model.get\_sentence\_embedding\_dimension}() \in \mathbb{N}$$
+           For our default model 'paraphrase-multilingual-MiniLM-L12-v2', $d = 384$.
+        2. FAISS Metric Space Construction:
+           Instantiates a flat inner product index:
+           $$\mathcal{I} = \text{faiss.IndexFlatIP}(d)$$
+           This represents a Euclidean vector space $\mathbb{R}^d$ under the inner product metric:
+           $$\langle \mathbf{x}, \mathbf{y} \rangle = \sum_{k=1}^d x_k y_k$$
+           Because our vector pipeline enforces $L_2$ normalization on all inputs, 
+           the inner product $\langle \mathbf{\hat{x}}, \mathbf{\hat{y}} \rangle$ maps exactly 
+           to the cosine similarity measure:
+           $$\text{Sim}_{cosine}(\mathbf{x}, \mathbf{y}) = \frac{\mathbf{x} \cdot \mathbf{y}}{\|\mathbf{x}\|_2 \|\mathbf{y}\|_2}$$
 
         Args:
-            data_dir: Carpeta donde se guardarán los archivos binarios.
-            model_name: Nombre del modelo de HuggingFace a utilizar.
-            in_memory: Si es True, no carga ni guarda del disco.
+            data_dir: Carpeta de persistencia física para guardar/cargar índices.
+            model_name: Identificador del modelo pre-entrenado en HuggingFace.
+            in_memory: Bandera booleana para ejecutar en memoria volátil (deshabilita E/S a disco).
         """
         self.in_memory = in_memory
         self.data_dir = Path(data_dir) if data_dir else None
@@ -78,10 +132,30 @@ class VectorStore:
         
     def build_from_documents(self, documents: dict[int, dict]) -> None:
         """
-        Codifica todos los documentos del store y construye el índice FAISS.
+        Codifica un corpus completo de documentos estructurados y construye el índice FAISS.
+        
+        Algorithmic Workflow & Mathematical Operations:
+        1. Context Extraction and Truncation:
+           For each document $d_j \in \mathcal{D}$:
+           $$T_j = \text{truncate}(\text{rich\_text}(d_j), L_{limit})$$
+           where $L_{limit} = 2000$ characters, limiting token overflow inside the Transformer.
+        2. Neural Inference (Forward Pass):
+           The sequence $T_j$ is passed to the bi-encoder transformer model:
+           $$\mathbf{e}_j = \text{TransformerEncoder}(T_j) \in \mathbb{R}^{384}$$
+           This creates a raw dense representation matrix $\mathbf{E} \in \mathbb{R}^{N \times 384}$.
+        3. Unit Hypersphere Projection ($L_2$ Normalization):
+           Each row vector $\mathbf{e}_j$ is normalized to unit length:
+           $$\mathbf{\hat{e}}_j = \frac{\mathbf{e}_j}{\|\mathbf{e}_j\|_2} = \frac{\mathbf{e}_j}{\sqrt{\sum_{k=1}^d e_{j,k}^2}}$$
+           This operation is executed efficiently in-place by the C++ core of FAISS via:
+           $$\text{faiss.normalize\_L2}(\mathbf{E})$$
+        4. Spatial Indexing Allocation:
+           The normalized embedding matrix is loaded into the inner-product flat index:
+           $$\mathcal{I} \leftarrow \mathcal{I} \cup \{\mathbf{\hat{e}}_1, \mathbf{\hat{e}}_2, \dots, \mathbf{\hat{e}}_N\}$$
+        5. Bijective Mapping Synchronisation:
+           Establishes mapping $f_{map}(i) = doc\_id_j$ for index positions $i \in [0, N-1]$.
 
         Args:
-            documents: Diccionario de películas proveniente del DocumentStore.
+            documents: Diccionario llave-valor conteniendo las películas estructuradas del DocumentStore.
         """
         logger.info("Generando embeddings para %d documentos...", len(documents))
         
@@ -123,7 +197,22 @@ class VectorStore:
     def build_from_texts(self, texts: list[str]) -> None:
         """
         Codifica una lista de textos planos y construye el índice FAISS en memoria.
-        Útil para indexar en tiempo real resultados de búsqueda web.
+        Diseñado para indexar dinámicamente resultados ad-hoc del buscador web (focused crawling).
+        
+        Mathematical Formulation:
+        Let $\mathcal{T} = \{t_1, t_2, \dots, t_M\}$ be a set of dynamically crawled web snippets.
+        1. Embed:
+           $$\mathbf{e}_i = \text{TransformerEncoder}(t_i) \in \mathbb{R}^d$$
+        2. Normalise:
+           $$\mathbf{\hat{e}}_i = \frac{\mathbf{e}_i}{\|\mathbf{e}_i\|_2}$$
+        3. Index:
+           $$\mathcal{I}_{temp} = \text{faiss.IndexFlatIP}(d)$$
+           $$\mathcal{I}_{temp}.\text{add}(\{\mathbf{\hat{e}}_1, \dots, \mathbf{\hat{e}}_M\})$$
+        
+        This dynamically populated temporary space allows direct vector search on live scraped data.
+
+        Args:
+            texts: Lista de segmentos de texto extraídos de páginas HTML web externas.
         """
         logger.info("Generando embeddings para %d chunks temporales...", len(texts))
         if not texts:
@@ -145,13 +234,29 @@ class VectorStore:
     def search(self, query: str, top_k: int = 10) -> list[tuple[int, float]]:
         """
         Busca los documentos más cercanos semánticamente a la consulta.
+        
+        Mathematical Search & Retrieval Flow:
+        1. Query Embedding Inference:
+           $$\mathbf{e}_q = \text{TransformerEncoder}(Q) \in \mathbb{R}^d$$
+        2. Query Projection to Unit Hypersphere:
+           $$\mathbf{\hat{e}}_q = \frac{\mathbf{e}_q}{\|\mathbf{e}_q\|_2}$$
+        3. Nearest Neighbor Matrix Multiplication:
+           FAISS computes exact inner products in parallel (C++ implementation):
+           $$s_j = \mathbf{\hat{e}}_q \cdot \mathbf{\hat{e}}_j = \sum_{k=1}^d \hat{e}_{q,k} \hat{e}_{j,k}$$
+           Since $\|\mathbf{\hat{e}}_q\|_2 = 1$ and $\|\mathbf{\hat{e}}_j\|_2 = 1$, we have:
+           $$s_j \in [-1.0, 1.0]$$
+        4. Argmax Filtering:
+           $$\text{Retrieval}(Q) = \operatorname{arg\,max}_{j \in [0, N-1]}^{\text{top\_k}} (s_j)$$
+        5. Score Calibration / Normalization:
+           To avoid negative bounds in UI layouts, we project the Cosine Score into $[0, 1]$:
+           $$s_j^{norm} = \min(1.0, \max(0.0, s_j))$$
 
         Args:
             query: Texto de búsqueda en lenguaje natural.
-            top_k: Número máximo de resultados.
+            top_k: Número máximo de resultados (vecinos más cercanos) a retornar.
 
         Returns:
-            Lista de tuplas (doc_id o idx, similitud_coseno) ordenada de mayor a menor.
+            Lista ordenada de tuplas (doc_id, score_normalizado) ordenada de mayor a menor relevancia.
         """
         if self.index.ntotal == 0:
             logger.warning("El índice vectorial está vacío. Ejecute un método build primero.")
@@ -177,7 +282,17 @@ class VectorStore:
         return results
         
     def save(self) -> None:
-        """Persiste el índice binario y el mapeo de IDs en disco."""
+        """
+        Persiste el índice binario de FAISS y el mapeo biyectivo en disco de forma transaccional.
+        
+        Flow:
+        1. FAISS Index Serialisation:
+           Serializes the C++ Index structure into a binary format at `index_path`:
+           $$\mathcal{I} \xrightarrow{\text{faiss.write\_index}} \text{faiss\_index.bin}$$
+        2. Bijective Map Persistency:
+           Serializes $f_{map}$ into JSON notation at `mapping_path`:
+           $$f_{map} \xrightarrow{\text{json.dump}} \text{vector\_mapping.json}$$
+        """
         if self.in_memory or not self.index_path or not self.mapping_path:
             return
         try:
@@ -189,7 +304,17 @@ class VectorStore:
             logger.error("Error al guardar VectorStore: %s", e)
             
     def load(self) -> None:
-        """Carga el índice y mapeos existentes para evitar re-entrenamiento."""
+        """
+        Carga el índice binario y reconstruye los mapeos bidireccionales en memoria.
+        
+        Algorithms:
+        1. Index Deserialisation:
+           $$\mathcal{I} \xleftarrow{\text{faiss.read\_index}} \text{faiss\_index.bin}$$
+        2. Bi-directional Map Re-allocation:
+           Reads the serialized dictionary $M_{raw}$:
+           $$f_{map} = \{ \text{int}(k): \text{int}(v) \quad \forall (k, v) \in M_{raw} \}$$
+           $$f_{map}^{-1} = \{ \text{int}(v): \text{int}(k) \quad \forall (k, v) \in M_{raw} \}$$
+        """
         if self.in_memory or not self.index_path or not self.mapping_path:
             return
         if self.index_path.exists() and self.mapping_path.exists():

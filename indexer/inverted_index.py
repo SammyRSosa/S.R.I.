@@ -1,17 +1,10 @@
 """
 indexer/inverted_index.py
-Módulo de Indexación — Oscar Insight Search (SRI 2025-2026)
+Inverted Index & Linguistic Processing Engine (Corte 2 & 3)
 
-Implementa el Índice Invertido base que será extendido en Corte 2 con la lógica
-del Modelo Booleano Extendido (Baeza-Yates & Ribeiro-Neto, 2011, Cap. 3-4).
-
-Estructura del índice:
-    self.index: dict[str, list[tuple[int, int]]]
-        término_normalizado → [(doc_id, tf), ...]
-
-donde tf (term frequency) es la frecuencia del término en el documento.
-El EBM necesita tf para calcular distancias euclidianas en el Corte 2:
-    sim_EBM(d, q) = 1 - dist(d, q) con dist basada en tf ponderado.
+Implements a normalized postings-list repository utilizing structured tokenization,
+stopword extraction, and morphological stem reduction algorithms.
+Extends base indexing to support suave logical evaluations within the Extended Boolean Model.
 """
 
 from __future__ import annotations
@@ -43,32 +36,53 @@ logger = logging.getLogger(__name__)
 
 class InvertedIndex:
     """
-    Índice Invertido con normalización completa de tokens.
+    MATHEMATICAL FORMALISM & LINGUISTIC PIPELINE: INVERTED INDEX
+    ============================================================
+    An Inverted Index is an architectural data structure that maps vocabulary terms
+    to the documents containing them, representing a sparse matrix.
+    
+    1. Postings List Formal Representation:
+       Let V = {t_1, t_2, ..., t_|V|} be the vocabulary set.
+       For each term t_i ∈ V, we maintain a Posting List P_i:
+       
+           P_i = [ (d_{i,1}, tf_{i,d_{i,1}}), (d_{i,2}, tf_{i,d_{i,2}}), ..., (d_{i,k}, tf_{i,d_{i,k}}) ]
+           
+           Where:
+           - d_{i,y} is the document identifier containing term t_i, ordered monotonically.
+           - tf_{i,d_{i,y}} is the Term Frequency (number of occurrences of t_i inside document d_{i,y}).
+           
+       This dual (doc_id, tf) postings structure allows O(1) term posting lookups,
+       enabling efficient p-norm distance calculations during EBM runtime.
 
-    Pipeline de normalización (_tokenize):
-        1. Minúsculas
-        2. Tokenización con nltk.word_tokenize
-        3. Filtro alfanumérico (elimina puntuación)
-        4. Eliminación de stop-words (inglés + español)
-        5. Stemming con SnowballStemmer (inglés por defecto)
-
-    Estructura de datos central::
-
-        self.index: dict[str, list[tuple[int, int]]]
-            { "oppenheim": [(0, 3), (2, 1)], ... }
+    2. Linguistic Normalization Pipeline:
+       Every text block undergoes a strict sequential transformation before index insertion:
+       
+       [Input Text]
+            │
+            ▼
+       [Case folding]       ──> Convert all characters to lowercase to eliminate casing noise.
+            │
+            ▼
+       [Tokenization]       ──> NLTK Word Tokenization splits strings on word/punctuation boundaries.
+            │
+            ▼
+       [Alphanumeric Filter]──> Keep only tokens containing at least one letter/digit (regex: [a-z0-9]).
+            │
+            ▼
+       [Stopwords Filter]   ──> Omit high-frequency terms. We fuse NLTK's English + Spanish sets,
+                                and append domain-specific movie stopwords (e.g. "film", "director").
+            │
+            ▼
+       [Morphological Stem] ──> Snowball Stemmer maps words to their linguistic base forms
+                                (e.g. "nominations", "nominated", "nominate" -> "nomin").
+            │
+            ▼
+       [Normalized Postings]
 
     Attributes:
-        index (dict): Posting lists: término → [(doc_id, tf)].
-        documents (dict): doc_id → texto original.
-        num_docs (int): Número de documentos indexados.
-
-    Example::
-
-        idx = InvertedIndex()
-        idx.add_document(0, "Oppenheimer won the Academy Award for Best Picture.")
-        idx.add_document(1, "The Oscars ceremony celebrated many films in 2024.")
-        print(idx.get_postings("award"))   # [( 0, 1)]
-        print(idx)
+        _raw_index (defaultdict): Internal nested hash map {term: {doc_id: tf}}.
+        documents (dict): Document store mapping doc_id -> raw text for snippet generation.
+        language (str): Base language for morphological analysis ('english' or 'spanish').
     """
 
     def __init__(self, language: str = "english") -> None:

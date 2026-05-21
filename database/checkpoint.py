@@ -2,26 +2,42 @@
 database/checkpoint.py
 Sistema de Checkpointing — Oscar Insight Search (SRI 2025-2026)
 
-Permite que el proceso de población sea interrumpible y reanudable sin
-duplicar datos. Estado persistido en data/checkpoint.json.
+=======================================================================================================
+                      MATHEMATICAL STATE-SPACE MODEL OF THE CHECKPOINT ENGINE
+=======================================================================================================
 
-Estructura del checkpoint:
-    {
-        "last_page_popularity": 45,
-        "last_page_quality": 12,
-        "processed_tmdb_ids": [872585, 11036, ...],
-        "failed_tmdb_ids": [99999],
-        "total_indexed": 900,
-        "last_updated": "2026-03-31T14:00:00"
-    }
+Let $\mathcal{S}_t$ represent the total execution state of the crawler/indexer pipeline at time $t$. 
+We formally define this state space as a 5-tuple:
+    $$\mathcal{S}_t = \left( \mathcal{P}_t, \mathcal{F}_t, p_t^{pop}, p_t^{qual}, N_t \right)$$
 
-Uso:
-    ck = Checkpoint()
-    if ck.is_processed(872585):
-        continue
-    # ... proceso la película ...
-    ck.mark_done(872585)
-    ck.save()
+where:
+1. $\mathcal{P}_t \subset \mathbb{N}$ represents the set of TMDB unique identifiers successfully 
+   crawled, processed, and inverted:
+    $$\mathcal{P}_t = \{ id_1, id_2, \dots, id_k \}$$
+2. $\mathcal{F}_t \subset \mathbb{N}$ represents the set of TMDB unique identifiers that failed during 
+   the fetching or scraping phases (due to TLS handshake failures, 404 HTTP errors, or selector timeouts):
+    $$\mathcal{F}_t = \{ id'_1, id'_2, \dots, id'_m \}$$
+3. $p_t^{pop} \in \mathbb{N}$ is the high-watermark page index reached by the TMDB discover API 
+   under the popularity-driven seed strategy: $\text{strategy} = \text{"popularity"}$.
+4. $p_t^{qual} \in \mathbb{N}$ is the high-watermark page index reached by the TMDB discover API 
+   under the quality-driven seed strategy: $\text{strategy} = \text{"quality"}$.
+5. $N_t \in \mathbb{N}$ represents the total cardinal count of fully committed documents:
+    $$N_t = |\mathcal{P}_t|$$
+
+State Transformations & Transitions:
+- Success Commit:
+  When a document with TMDB ID $x$ is processed successfully, the state transition is defined as:
+    $$\mathcal{P}_{t+1} = \mathcal{P}_t \cup \{x\}$$
+    $$\mathcal{F}_{t+1} = \mathcal{F}_t \setminus \{x\}$$
+- Failure Commit:
+  When a document with TMDB ID $x$ fails:
+    $$\mathcal{F}_{t+1} = \mathcal{F}_t \cup \{x\}$$
+    $$\mathcal{P}_{t+1} = \mathcal{P}_t \setminus \{x\}$$
+
+Membership Assertions (O(1) Hash-Set Lookup Complexity):
+To decide whether to skip a seed candidate $x$, the parser queries the state:
+    $$\text{Skip}(x) = [x \in \mathcal{P}_t \cup \mathcal{F}_t]$$
+Using hash-sets, this boolean membership resolution takes $O(1)$ average-case time complexity.
 """
 
 from __future__ import annotations
@@ -64,6 +80,13 @@ class Checkpoint:
     """
 
     def __init__(self, path: str | Path = DEFAULT_CHECKPOINT_PATH) -> None:
+        """
+        Inicializa la estructura de datos del checkpoint cargando cualquier estado previo del disco.
+        
+        Mathematical Initialization:
+        Allocates $\mathcal{P}_0 = \emptyset$ and $\mathcal{F}_0 = \emptyset$ as memory sets, 
+        then attempts to deserialize $\mathcal{S}_{saved}$ from the disk store.
+        """
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -81,20 +104,46 @@ class Checkpoint:
     # ─── API pública ──────────────────────────────────────────────────────────
 
     def is_processed(self, tmdb_id: int) -> bool:
-        """True si el tmdb_id ya fue procesado (éxito o fallo)."""
+        """
+        True si el tmdb_id ya fue procesado (pertenece a los conjuntos de éxito o fallo).
+        
+        Mathematical Definition:
+        $$x \in \mathcal{P}_t \lor x \in \mathcal{F}_t$$
+        Returns `True` if the TMDB ID exists in either set, triggering an immediate execution bypass.
+        """
         return tmdb_id in self.processed_ids or tmdb_id in self.failed_ids
 
     def mark_done(self, tmdb_id: int) -> None:
-        """Marca un tmdb_id como procesado exitosamente."""
+        """
+        Marca un tmdb_id como procesado exitosamente.
+        
+        Mathematical State Transition:
+        $$\mathcal{P}_{t+1} \leftarrow \mathcal{P}_t \cup \{x\}$$
+        $$\mathcal{F}_{t+1} \leftarrow \mathcal{F}_t \setminus \{x\}$$
+        """
         self.processed_ids.add(tmdb_id)
         self.failed_ids.discard(tmdb_id)  # Quitar de fallidos si estaba
 
     def mark_failed(self, tmdb_id: int) -> None:
-        """Marca un tmdb_id como fallido (se puede reintentar con --retry-failed)."""
+        """
+        Marca un tmdb_id como fallido (se puede reintentar con --retry-failed).
+        
+        Mathematical State Transition:
+        $$\mathcal{F}_{t+1} \leftarrow \mathcal{F}_t \cup \{x\}$$
+        """
         self.failed_ids.add(tmdb_id)
 
     def save(self) -> None:
-        """Persiste el estado actual en checkpoint.json."""
+        """
+        Persiste el estado actual en checkpoint.json de forma transaccional.
+        
+        Persistency Transformation:
+        Let $f_{serialize}: \mathcal{S}_t \to \text{JSON\_String}$ be a transformation that maps 
+        sets $\mathcal{P}_t$ and $\mathcal{F}_t$ to sorted integer arrays to guarantee canonical representation 
+        and deterministic file diffs:
+        $$f_{serialize}(\mathcal{P}_t) = \text{sort}(\mathcal{P}_t)$$
+        $$f_{serialize}(\mathcal{F}_t) = \text{sort}(\mathcal{F}_t)$$
+        """
         payload = {
             "last_page_popularity":  self.last_page_popularity,
             "last_page_quality":     self.last_page_quality,
@@ -111,7 +160,14 @@ class Checkpoint:
         )
 
     def reset(self) -> None:
-        """Borra todo el estado (para empezar desde cero)."""
+        """
+        Borra todo el estado (para empezar desde cero).
+        
+        Reset Boundary:
+        $$\mathcal{P}_{new} = \emptyset, \quad \mathcal{F}_{new} = \emptyset$$
+        $$p^{pop} = 0, \quad p^{qual} = 0, \quad N = 0$$
+        Deletes the physical backing file on the filesystem to restore clean state.
+        """
         self.processed_ids = set()
         self.failed_ids    = set()
         self.last_page_popularity = 0
@@ -124,7 +180,13 @@ class Checkpoint:
     # ─── Carga ────────────────────────────────────────────────────────────────
 
     def _load(self) -> None:
-        """Carga el estado desde checkpoint.json."""
+        """
+        Carga y deserializa el estado desde checkpoint.json.
+        
+        Deserialisation Mapping:
+        $$\mathcal{P}_t \leftarrow \{ x \in \text{JSON.processed\_tmdb\_ids} \}$$
+        $$\mathcal{F}_t \leftarrow \{ x \in \text{JSON.failed\_tmdb\_ids} \}$$
+        """
         try:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -150,6 +212,17 @@ class Checkpoint:
         return {
             "processed": len(self.processed_ids),
             "failed":    len(self.failed_ids),
+            "indexed":   self.total_indexed,
+            "pop_page":  self.last_page_popularity,
+            "qua_page":  self.last_page_quality,
+        }
+
+    def __repr__(self) -> str:
+        s = self.stats()
+        return (
+            f"Checkpoint(processed={s['processed']}, failed={s['failed']}, "
+            f"indexed={s['indexed']}, path='{self.path}')"
+        )ailed_ids),
             "indexed":   self.total_indexed,
             "pop_page":  self.last_page_popularity,
             "qua_page":  self.last_page_quality,

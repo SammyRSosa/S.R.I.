@@ -2,18 +2,58 @@
 crawler/scraper.py
 Módulo de Adquisición — Oscar Insight Search (SRI 2025-2026)
 
-MetacriticReviewScraper: extrae User Reviews detalladas empleando curl_cffi
-para evadir la protección Cloudflare / WAF mediante TLS Fingerprinting real (impersonate="chrome124").
+=======================================================================================================
+               MATHEMATICAL & TECHNICAL THEORY OF TLS EVASION AND FOCUSED CRAWLING
+=======================================================================================================
 
-Se pivota a Metacritic (User/Critic Reviews) porque Letterboxd contiene
-excesivo ruido ("chistes internos") e IMDb/RT bloquean a nivel de DataDome
-o usan Shadow DOM no-indexable que ralentiza el pipeline completo. Metacritic
-ofrece reseñas largas y críticas reales, ideal para el NLP del Modelo Booleano Extendido.
+This module implements a resilient web crawling layer designed to bypass modern Web Application 
+Firewalls (WAF) such as Cloudflare or DataDome, targeting Metacritic to harvest user reviews.
 
-Funcionalidad:
-  1. Sesión única curl_cffi.requests.Session con TLS fingerprint de Chrome.
-  2. Resolución heurística de slugs: /movie/{slug}/user-reviews/
-  3. Extracción de al menos 10 críticas largas (>100 caracteres).
+1. TLS Fingerprint Impersonation Heuristics
+-------------------------------------------
+Traditional `requests` or `urllib` standard HTTP clients trigger high-entropy anomaly detection alerts 
+at the WAF layer. WAFs analyze the JA3 TLS fingerprint, which represents a signature computed from:
+    $$\text{JA3} = \{ \text{TLSVersion}, \text{Ciphers}, \text{Extensions}, \text{EllipticCurves}, \text{CurveFormats} \}$$
+To circumvent this, we utilize `curl_cffi` to execute a full low-level mimicry of Chrome's TLS 
+ClientHello packet exchange:
+    $$\text{ClientHello}_{\text{our\_agent}} \equiv \text{ClientHello}_{\text{Chrome v124}}$$
+This ensures that the Cypher Suite distribution and packet structure are mathematically indistinguishable 
+from a legitimate desktop web browser.
+
+2. Canonical Slugification Mapping
+----------------------------------
+Let $T$ be a natural language string representing a movie title. We define a slug mapping 
+$\text{slug}(T)$ that converts the title into a Metacritic-compatible URL path segment:
+    $$\text{slug}(T) = g \left( f \left( \text{NFKD}(T) \right) \right)$$
+where:
+- $\text{NFKD}(T)$ decomposes unicode ligatures and diacritics into ASCII equivalent base forms.
+- $f(x)$ is a regular expression projection that filters all characters outside lowercase alphabetic, 
+  digits, space, and hyphen:
+    $$f(x) = \text{RegexpReplace}(x, \text{"[^a-z0-9\s-]"}) \text{ (lowercased)}$$
+- $g(y)$ compresses multi-space blocks and maps spaces strictly to hyphens:
+    $$g(y) = \text{RegexpReplace}(y, \text{"\s+"}, \text{"-"})$$
+
+3. Focused Crawling & Finite State Machine (FSM) Link Selection
+--------------------------------------------------------------
+Rather than crawling the whole domain $\mathcal{W}$, our crawler implements a Directed Focused 
+Crawling algorithm. Let $s_{slug}$ be our query slug.
+- Seed URL Generation:
+    $$u_{seed} = \text{"https://www.metacritic.com/search/"} \mathbin{\|} s_{slug} \mathbin{\|} \text{"/"}$$
+- Hyperlink Graph Resolution:
+  Let $\mathcal{L} = \{ (u_i, t_i) \}$ be the set of hyperlinks discovered in the response HTML.
+  We filter these to select the exact movie target URL:
+    $$u_{movie} = \operatorname{FilterLink}(\mathcal{L}, T_{target}, Y_{target})$$
+  The link selection function $\text{FilterLink}$ validates:
+    $$\text{FilterLink}(u, t) \iff \text{domain}(u) \subseteq \text{"metacritic.com"} \land \text{IsMatch}(u, t)$$
+  where $\text{IsMatch}(u, t)$ maps to a regex-based token matching heuristic verifying that the 
+  slug lies in the URL path, alongside movie release year alignment:
+    $$\text{IsMatch}(u, t) = [s_{slug} \subseteq \text{path}(u)] \land \left( Y_{target} \ne \text{None} \implies Y_{target} \in \text{path}(u) \lor Y_{target} \in t \right)$$
+
+4. Content Quality Filtering Constraints
+----------------------------------------
+To populate the Extended Boolean Index with high-quality token sets, scraped review nodes 
+are filtered using standard length-bound constraints:
+    $$\mathcal{R}_{clean} = \{ r_j \in \mathcal{R}_{raw} \mid 100 < |r_j| < 3000 \land r_j \notin \mathcal{H}_{UI\_boilerplate} \}$$
 """
 
 from __future__ import annotations
@@ -59,9 +99,19 @@ class MetacriticReviewScraper:
     """
     Extractor de reseñas ricas de Metacritic con TLS fingerprinting.
     Proporciona texto analítico rico para el índice invertido.
+
+    Attributes:
+        _s (Session): curl_cffi.requests.Session object initialized with 'chrome124' impersonation.
     """
 
     def __init__(self, warmup: bool = True) -> None:
+        """
+        Inicializa la sesión de curl_cffi con impersonación del navegador.
+        
+        Initialization Model:
+        $$\mathcal{S}_{session} = \text{Session}(\text{impersonate} = \text{"chrome124"})$$
+        $$\mathcal{S}_{session}.\text{headers} \leftarrow \text{CHROME\_HEADERS}$$
+        """
         self._s = Session(impersonate=IMPERSONATE)
         self._s.headers.update(CHROME_HEADERS)
 
@@ -71,9 +121,24 @@ class MetacriticReviewScraper:
     # ─── Sesión ───────────────────────────────────────────────────────────────
 
     def _sleep(self, extra: float = 0.0) -> None:
+        """
+        Aplica un retraso aleatorio uniforme para evitar el bloqueo del firewall.
+        
+        Politeness Delay Formulation:
+        Let $t_{delay}$ be the duration of the sleep interval:
+        $$t_{delay} \sim \mathcal{U}(\Delta_{min}, \Delta_{max}) + \delta_{extra}$$
+        where $\Delta_{min} = 1.5$ seconds, $\Delta_{max} = 3.5$ seconds, and $\delta_{extra}$ is an optional bias term.
+        """
         time.sleep(random.uniform(DELAY_MIN, DELAY_MAX) + extra)
 
     def _warmup(self) -> None:
+        """
+        Realiza una petición inicial para establecer cookies y parámetros de sesión.
+        
+        Warmup Operation:
+        $$GET("https://www.metacritic.com/movie/") \to \mathcal{S}_{session}.\text{cookies}$$
+        This ensures subsequent focused requests carry valid session indicators.
+        """
         logger.info("Iniciando sesión Metacritic (warmup)...")
         res = self._get(BASE_URL + "/movie/")
         if res:
@@ -81,6 +146,14 @@ class MetacriticReviewScraper:
         self._sleep()
 
     def _get(self, url: str, label: str = "") -> Optional[str]:
+        """
+        Ejecuta una petición GET HTTP con reintentos y tolerancia a fallos.
+        
+        Network Politeness & Error Recovery:
+        Let $R$ be the current retry attempt count, $R \in [0, R_{max}]$.
+        On retry, the exponential backoff sleep interval is formulated as:
+        $$t_{backoff} \sim \mathcal{U}(\Delta_{min}, \Delta_{max}) + 2 \cdot R$$
+        """
         for attempt in range(MAX_RETRIES + 1):
             if attempt > 0:
                 time.sleep(random.uniform(DELAY_MIN, DELAY_MAX) + (attempt * 2))
@@ -105,7 +178,12 @@ class MetacriticReviewScraper:
 
     @staticmethod
     def _slugify(text: str) -> str:
-        """Convierte título en slug Metacritic (alfa numérico lowercase y guiones)."""
+        """
+        Convierte un título de película a su representación de slug en Metacritic.
+        
+        Mathematical Mapping:
+        $$\text{slug}(T) = \text{RegexReplace}(\text{RegexReplace}(\text{NFKD}(T), \text{"[^a-z0-9\\s-]"}), \text{"\\s+"}, \text{"-"})$$
+        """
         nfkd = unicodedata.normalize("NFKD", text)
         ascii_ = nfkd.encode("ascii", "ignore").decode("ascii")
         # En Metacritic los caracteres especiales se remueven de forma similar a otros sitios
@@ -113,6 +191,16 @@ class MetacriticReviewScraper:
         return re.sub(r"\s+", "-", slug.strip())
 
     def _parse_reviews(self, html: str, max_n: int) -> list[str]:
+        """
+        Extrae y limpia las reseñas desde el árbol DOM usando selectores CSS heurísticos.
+        
+        Parsing Operations:
+        Let $\mathcal{D}_{DOM}$ be the DOM tree parsed via `lxml`.
+        We search for nodes matching specific classes:
+        $$\mathcal{N} = \{ n \in \mathcal{D}_{DOM} \mid \text{class}(n) \cap \mathcal{C}_{target} \neq \emptyset \}$$
+        We extract text and apply filtering:
+        $$\mathcal{R} = \{ \text{clean}(n.\text{text}) \mid n \in \mathcal{N} \land L_{min} < |\text{text}| < L_{max} \}$$
+        """
         soup = BeautifulSoup(html, "lxml")
         reviews = []
         
@@ -156,7 +244,12 @@ class MetacriticReviewScraper:
 
     @staticmethod
     def _is_internal(url: str) -> bool:
-        """Verifica si un URL absoluto pertenece al dominio metacritic.com."""
+        """
+        Verifica si un URL absoluto pertenece al dominio metacritic.com.
+        
+        Domain Validation:
+        $$\text{isValid}(u) = [\text{netloc}(u) \subseteq \text{"metacritic.com"}]$$
+        """
         from urllib.parse import urlparse
         try:
             parsed = urlparse(url)
@@ -166,7 +259,15 @@ class MetacriticReviewScraper:
             return False
 
     def _is_movie_match(self, url_path: str, link_text: str, target_title: str, target_year: Optional[int]) -> bool:
-        """Determina heurísticamente si una ruta de URL corresponde a la película buscada."""
+        """
+        Determina heurísticamente si una ruta de URL corresponde a la película buscada.
+        
+        Heuristic Decision Model:
+        Let $s_{target}$ be the target slug.
+        $$\text{match}(u, t) = [s_{target} \subseteq \text{slug}(u)] \lor [\text{slug}(u) \subseteq s_{target}]$$
+        If $Y_{target}$ is specified:
+        $$\text{match}(u, t) \leftarrow \text{match}(u, t) \land \left( Y_{target} \in \text{slug}(u) \lor Y_{target} \in t \right)$$
+        """
         target_slug = self._slugify(target_title)
         path_parts = [p for p in url_path.split('/') if p]
         if not path_parts or path_parts[0] != "movie":
@@ -200,6 +301,13 @@ class MetacriticReviewScraper:
         """
         Obtiene `max_reviews` críticas largas (User Reviews) de Metacritic
         usando un pipeline de Focused Crawling dinámico.
+        
+        Algorithmic Pipeline:
+        1. Seed Generation: Resolves $u_{seed} = f(\text{slug}(T))$.
+        2. Query and Extraction: Harvests all $\mathcal{L}_{raw}$ in the seed search page.
+        3. FSM Filter Routing: Filters internal links matching the target film.
+        4. Detail Deep Crawl: Follows the matching link to extract the User Reviews tab URL.
+        5. Content Parsing: Processes review text through length-bound quality filters.
         """
         from urllib.parse import urljoin, urlparse
         

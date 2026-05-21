@@ -10,10 +10,47 @@ logger = logging.getLogger(__name__)
 
 class RAGManager:
     """
-    Módulo de Generación Aumentada por Recuperación (RAG).
-    
-    Responsable de orquestar la comunicación con el LLM (Groq)
-    y construir los prompts enriquecidos con contexto cinematográfico.
+    =======================================================================================================
+                        MATHEMATICAL STATE-SPACE MODEL OF THE RAG SYSTEM
+    =======================================================================================================
+    The RAG (Retrieval-Augmented Generation) pipeline acts as a semantic bridge mapping a bilingual high-dimensional 
+    query space $\\mathcal{Q}$ and a retrieved structured database subset $\\mathcal{D}_{\\text{retrieved}}$ to a cohesive, 
+    factual, natural language response space $\\mathcal{R}$.
+
+    1. Information Flow Architecture
+    --------------------------------
+    ```
+      [Query Q_ES] ──> [Translation Operator g_trans] ──> [Query Q_EN] ──> [EBM / Semantic VEC Search]
+                                                                                   │
+                                                                                   ▼
+      [Generated Answer R] <── [LLM Auto-regressive Inference] <── [Serialization S(D)]
+    ```
+
+    2. Formal Mathematical Transformations
+    --------------------------------------
+    Let $Q_{\\text{ES}}$ be the user query in Spanish.
+    - **Translation Mapping**:
+      The translator $g_{\\text{trans}}: \\Sigma^* \\to \\Sigma^*$ projects the Spanish natural language expression into 
+      an English semantic equivalent to optimize retrieval recall over the English document collection:
+          $$Q_{\\text{EN}} = g_{\\text{trans}}(Q_{\\text{ES}}) = \\arg\\max_{T \\in \\Sigma^*} \\prod_{i=1}^M P(t_i \\mid t_1, \\dots, t_{i-1}, Q_{\\text{ES}}, K_{\\text{trans}}; \\theta_{\\text{LLM}})$$
+      where $K_{\\text{trans}}$ is the system zero-shot boundary instruction.
+
+    - **Information-Theoretic Context Serialization**:
+      Let $D = \\{d_1, d_2, \\dots, d_N\\}$ be the subset of top-$N$ ranked documents returned by the search engine.
+      We formulate the context encoder $\\mathcal{S}: D \\to \\mathcal{X}$ under strict sequence length constraints:
+          $$\\mathcal{S}(D) = \\bigoplus_{i=1}^N \\text{FormatRecord}(d_i)$$
+      subject to the budget constraint:
+          $$\\sum_{i=1}^N \\text{Len}(\\text{FormatRecord}(d_i)) \\le \\mathcal{W}_{\\text{context}} - \\text{Len}(Q) - \\text{Len}(\\text{SystemPrompt})$$
+
+    - **Closed-World Anti-Hallucination Bound**:
+      We model the factual correctness under the retrieved context as a logical predicate validation constraint:
+          $$\\text{Factual}(R, D) \\iff \\forall \\text{ statement } s \\in R, \\ \\exists d \\in D \\text{ s.t. } d \\models s$$
+      If the predicate cannot be satisfied (i.e. query terms do not intersect with context attributes), the generation 
+      boundary yields the null result $\\emptyset$, triggering a deterministic rejection:
+          $$\\text{Response}(Q, D) = \\begin{cases} 
+              f_{\\text{LLM}}(P(Q, \\mathcal{S}(D))) & \\text{if } D \\neq \\emptyset \\text{ and } \\text{Valid}(Q, D) \\\\
+              \\text{"No se encontraron resultados relevantes..."} & \\text{otherwise}
+          \\end{cases}$$
     """
 
     SYSTEM_PROMPT = """
@@ -49,7 +86,14 @@ CONTEXTO DE PELÍCULAS RECUPERADAS:
                 self.client = None
 
     def _format_context(self, results: List[Dict[str, Any]]) -> str:
-        """Convierte los resultados de búsqueda en un bloque de texto para el prompt."""
+        """
+        Convierte los resultados de búsqueda en un bloque de texto formateado para el prompt.
+
+        Mathematical Representation:
+        We define the serialization mapping $\\text{FormatRecord}: r \\to x$:
+        $$\\text{FormatRecord}(r) = \\text{"--- Película "} \\cdot r[\\text{"title"}] \\cdot \\dots \\cdot r[\\text{"snippet"}]$$
+        This aggregates all key/value pairs into a deterministic string structure.
+        """
         context_blocks = []
         for i, res in enumerate(results, 1):
             block = (
@@ -67,7 +111,15 @@ CONTEXTO DE PELÍCULAS RECUPERADAS:
         return "\n".join(context_blocks)
 
     def translate_query_for_ebm(self, query: str) -> str:
-        """Traduce una consulta al inglés de forma ultra-rápida para mejorar el recall del motor léxico."""
+        """
+        Traduce una consulta al inglés de forma ultra-rápida para mejorar el recall del motor léxico.
+
+        Mathematical Modeling:
+        Let $Q_{\\text{ES}}$ be the input. We seek the translation $Q_{\\text{EN}}$:
+            $$Q_{\\text{EN}} = \\arg\\max_{T} \\prod_{i=1}^k P(t_i \\mid t_1, \\dots, t_{i-1}, Q_{\\text{ES}}; \\theta_{\\text{LLM}})$$
+        conditioned on minimizing temperature ($T = 0.0$) to guarantee deterministic decoding:
+            $$\\lim_{T \\to 0^+} P(T) = \\delta(T - \\text{CanonicalTranslation})$$
+        """
         if not self.client:
             return query
             
@@ -93,6 +145,13 @@ CONTEXTO DE PELÍCULAS RECUPERADAS:
     def generate_response(self, query: str, retrieved_docs: List[Dict[str, Any]]) -> str:
         """
         Genera una respuesta enriquecida basada en los documentos recuperados.
+
+        Mathematical Formulation:
+        Let $\\mathcal{X} = \\mathcal{S}(\\mathcal{D}_{\\text{retrieved}})$ be the serialized context.
+        The response $R$ is generated by computing:
+            $$R = f_{\\text{LLM}}(\\text{SystemPrompt}(\\mathcal{X}) \\circ \\text{UserPrompt}(Q))$$
+        subject to:
+            $$\\text{Factual correctness under } \\mathcal{X} \\quad \\text{and} \\quad T = 0.2 \\ \\text{(low entropy generating policy)}$$
         """
         if not self.client:
             return (
