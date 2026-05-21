@@ -574,11 +574,11 @@
                             <div class="text-[10px] text-gray-500 mt-1">${rec.year} | ${rec.director.substring(0, 15)}</div>
                             <!-- Score Breakdown -->
                             <div class="mt-2 text-[9px] text-gray-400 font-mono">
-                                VSM: ${(rec.vsm_score).toFixed(2)} | META: ${(rec.meta_score).toFixed(2)}
+                                VSM: ${(rec.cosine_similarity).toFixed(2)} | META: ${(rec.metadata_similarity).toFixed(2)}
                             </div>
                             <!-- Overall Score Badge -->
                             <div class="absolute top-2 right-2 bg-amber-900/40 text-amber-400 text-[10px] font-bold px-1.5 py-0.5 rounded border border-amber-500/30">
-                                ${(rec.score * 100).toFixed(0)}%
+                                ${(rec.similarity * 100).toFixed(0)}%
                             </div>
                         </div>
                     `;

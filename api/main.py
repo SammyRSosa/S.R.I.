@@ -161,31 +161,34 @@ async def search(request: SearchRequest):
     # --- QUERY TRANSLATION ---
     translated_query = rag_manager.translate_query_for_ebm(query)
     
+    # --- METADATA EXTRACTION (una vez, fuera del loop) ---
+    extracted_meta = extract_metadata_from_query(query)
+    target_year = extracted_meta.get('year')
+    
     # 1. Búsqueda EBM (Lógica Booleana Suave) - Usando Query Traducida
     ebm_results = ebm.search(translated_query, op="OR")
     
     # 2. Búsqueda Semántica Vectorial (FAISS Local) - Usando Query Original
-    vec_results = v_store.search(query, top_k=100) if v_store.index and v_store.index.ntotal > 0 else []
+    try:
+        vec_results = v_store.search(query, top_k=100) if v_store.index and v_store.index.ntotal > 0 else []
+    except Exception as e:
+        logger.error("Error en búsqueda vectorial: %s", e)
+        vec_results = []
+    
+    logger.info("EBM devolvio %d resultados | VEC devolvio %d resultados", len(ebm_results), len(vec_results))
     
     # --- FUSIÓN HÍBRIDA: RECIPROCAL RANK FUSION (RRF) ---
-    # RRF formula: 1 / (k + rank) donde k es típicamente 60
     k_rrf = 60
     
-    # Convertir resultados a diccionarios de rangos (rank empieza en 1)
     ebm_ranks = {doc_id: rank for rank, (doc_id, _) in enumerate(ebm_results, 1)}
     vec_ranks = {doc_id: rank for rank, (doc_id, _) in enumerate(vec_results, 1)}
     
-    # Diccionarios para scores crudos (para mostrar en la UI)
     ebm_scores_map = {doc_id: score for doc_id, score in ebm_results}
     vec_scores_map = {doc_id: score for doc_id, score in vec_results}
     
-    # Unir todos los IDs de documentos recuperados por ambos motores
     all_doc_ids = set(ebm_ranks.keys()) | set(vec_ranks.keys())
     
-    # 3. Construcción de resultados locales y cálculo de score RRF combinado
     combined = []
-    
-    # Obtener el año actual para cálculo de frescura
     from datetime import datetime
     current_year = datetime.now().year
 
@@ -195,31 +198,20 @@ async def search(request: SearchRequest):
             continue
             
         # --- HARD METADATA FILTER ---
-        extracted_meta = extract_metadata_from_query(query)
-        target_year = extracted_meta.get('year')
-        
         if target_year is not None:
             film_year = film.get("year")
             try:
-                # Si el año no coincide, filtramos estrictamente
                 if int(film_year) != target_year:
                     continue
             except (ValueError, TypeError):
-                continue # Si la película no tiene un año válido y se requiere uno
+                continue
         
-        # Cálculo RRF
-        rank_ebm = ebm_ranks.get(doc_id, 1000) # Si no está, penalizar rango
-        rank_vec = vec_ranks.get(doc_id, 1000)
-        
-        rrf_ebm = 1.0 / (k_rrf + rank_ebm)
-        rrf_vec = 1.0 / (k_rrf + rank_vec)
-        
-        # Obtener scores crudos para la UI
+        # Obtener scores crudos para la UI y para el ranking
         s_ebm = ebm_scores_map.get(doc_id, 0.0)
         s_vec = vec_scores_map.get(doc_id, 0.0)
         
-        # Score Base (RRF Ponderado) -> RRF produce números pequeños, escalamos artificialmente para la UI
-        base_score = ((rrf_ebm * request.ebm_weight) + (rrf_vec * request.vector_weight)) * 100.0
+        # Score Base: Combinación lineal ponderada de scores crudos (ambos en rango 0-1)
+        base_score = (s_ebm * request.ebm_weight) + (s_vec * request.vector_weight)
 
         # --- POSICIONAMIENTO AVANZADO (Corte 3) ---
         # 1. Factor Popularidad (Normalizado de 0 a 1, asumiendo max ~100)
@@ -264,18 +256,18 @@ async def search(request: SearchRequest):
     # Ordenar por score combinado
     combined.sort(key=lambda x: x.score, reverse=True)
     
-    # --- MÓDULO DE BÚSQUEDA WEB AUTOMÁTICO (Corte 2) ---
+    # --- MÓDULO DE BÚSQUEDA WEB AUTOMÁTICO (Corte 3) ---
+    # Usa el score COMBINADO (no solo EBM) para decidir si activar el fallback.
+    # Esto evita búsquedas web innecesarias cuando ya hay buenos resultados locales.
     was_web_search = False
-    # Disparador: Menos de 3 resultados o el mejor resultado tiene score bajo (< 0.25)
-    top_score = combined[0].score if combined else 0
-    if len(combined) < 3 or top_score < 0.25:
+    top_combined = combined[0].score if combined else 0
+    if len(combined) < 3 or top_combined < 0.15:
+        logger.info("Activando Web Fallback: %d resultados locales, top_combined=%.3f", len(combined), top_combined)
         web_results = web_searcher.search_and_format(query)
         if web_results:
             was_web_search = True
-            # Convertir dicts a SearchResult objects
             web_objects = [SearchResult(**r) for r in web_results]
             combined.extend(web_objects)
-            # Re-ordenar la combinación por score
             combined.sort(key=lambda x: x.score, reverse=True)
 
     results = combined[:request.top_k]
