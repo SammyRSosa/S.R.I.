@@ -1,4 +1,4 @@
-"""
+r"""
 database/checkpoint.py
 Sistema de Checkpointing — Oscar Insight Search (SRI 2025-2026)
 
@@ -80,7 +80,7 @@ class Checkpoint:
     """
 
     def __init__(self, path: str | Path = DEFAULT_CHECKPOINT_PATH) -> None:
-        """
+        r"""
         Inicializa la estructura de datos del checkpoint cargando cualquier estado previo del disco.
         
         Mathematical Initialization:
@@ -104,7 +104,7 @@ class Checkpoint:
     # ─── API pública ──────────────────────────────────────────────────────────
 
     def is_processed(self, tmdb_id: int) -> bool:
-        """
+        r"""
         True si el tmdb_id ya fue procesado (pertenece a los conjuntos de éxito o fallo).
         
         Mathematical Definition:
@@ -114,7 +114,7 @@ class Checkpoint:
         return tmdb_id in self.processed_ids or tmdb_id in self.failed_ids
 
     def mark_done(self, tmdb_id: int) -> None:
-        """
+        r"""
         Marca un tmdb_id como procesado exitosamente.
         
         Mathematical State Transition:
@@ -125,7 +125,7 @@ class Checkpoint:
         self.failed_ids.discard(tmdb_id)  # Quitar de fallidos si estaba
 
     def mark_failed(self, tmdb_id: int) -> None:
-        """
+        r"""
         Marca un tmdb_id como fallido (se puede reintentar con --retry-failed).
         
         Mathematical State Transition:
@@ -134,7 +134,7 @@ class Checkpoint:
         self.failed_ids.add(tmdb_id)
 
     def save(self) -> None:
-        """
+        r"""
         Persiste el estado actual en checkpoint.json de forma transaccional.
         
         Persistency Transformation:
@@ -160,7 +160,7 @@ class Checkpoint:
         )
 
     def reset(self) -> None:
-        """
+        r"""
         Borra todo el estado (para empezar desde cero).
         
         Reset Boundary:
@@ -180,7 +180,7 @@ class Checkpoint:
     # ─── Carga ────────────────────────────────────────────────────────────────
 
     def _load(self) -> None:
-        """
+        r"""
         Carga y deserializa el estado desde checkpoint.json.
         
         Deserialisation Mapping:
@@ -212,17 +212,6 @@ class Checkpoint:
         return {
             "processed": len(self.processed_ids),
             "failed":    len(self.failed_ids),
-            "indexed":   self.total_indexed,
-            "pop_page":  self.last_page_popularity,
-            "qua_page":  self.last_page_quality,
-        }
-
-    def __repr__(self) -> str:
-        s = self.stats()
-        return (
-            f"Checkpoint(processed={s['processed']}, failed={s['failed']}, "
-            f"indexed={s['indexed']}, path='{self.path}')"
-        )ailed_ids),
             "indexed":   self.total_indexed,
             "pop_page":  self.last_page_popularity,
             "qua_page":  self.last_page_quality,
