@@ -1,0 +1,295 @@
+Oscar Insight Search
+Respuestas a Preguntas de Defensa del Proyecto
+
+Sistemas de Recuperación de Información · Curso 2025-2026
+Documento de preparación para la evaluación final (Corte 3)
+
+Pregunta 1: ¿Qué dominio temático eligieron y qué características presentan los documentos iniciales?
+
+Dominio seleccionado: Cine y Premios Oscar (dominio Cultura y Entretenimiento).
+El corpus inicial está conformado por 1,623 documentos estructurados sobre películas históricamente vinculadas a los Premios Oscar o de alta relevancia cinematográfica. La selección de este dominio responde a sus características ideales para un SRI completo:
+Variedad de tipos de consulta: por nombre exacto (actores, directores, títulos), por concepto temático (géneros, temas narrativos), por atributo estructurado (año, presupuesto).
+Documentos ricos en texto: cada película agrega el campo rich_text con sinopsis oficial (TMDB overview), reseñas largas de usuarios (Metacritic) y metadatos textualizados.
+Terminología especializada con entidades nombradas que exige tanto precisión léxica como comprensión semántica.
+Cada documento sigue el esquema v2 del DocumentStore:
+Campos estructurados: title, year, metadata.director, metadata.cast, metadata.genres, metadata.budget, metadata.revenue, metadata.vote_average, metadata.tmdb_id, metadata.imdb_id, metadata.tagline
+Campo de texto consolidado: rich_text (concatenación de título + géneros + director + reparto + sinopsis + reseñas críticas)
+Campo de conteo: reviews_count (número de reseñas de Metacritic incorporadas)
+El tamaño promedio del campo rich_text es de aproximadamente 800-1,200 caracteres por documento, con una densidad terminológica alta y vocabulario bilingüe (inglés predominante, algunas reseñas en español).
+
+Pregunta 2: ¿Qué modelo de recuperación no básico implementaron? ¿Qué ventajas tiene frente a los modelos básicos para su dominio? Citen la fuente bibliográfica.
+
+Modelo implementado: Modelo Booleano Extendido (Extended Boolean Model — EBM), propuesto por Salton, Fox y Wu en 1983.
+Fundamento Matemático
+El EBM generaliza el Modelo Booleano Clásico mediante la fórmula de p-norma. Los pesos TF-IDF se calculan como:
+w(i,j) = (tf(i,j) / max_tf(j)) × (log(N/n_i) / log(N))
+Las fórmulas de similitud para operadores OR y AND son:
+Sim_OR(d,q)  = [ (w₁ᵖ + w₂ᵖ + ··· + wₘᵖ) / m ]^(1/p)
+Sim_AND(d,q) = 1 − [ ((1−w₁)ᵖ + ··· + (1−wₘ)ᵖ) / m ]^(1/p)
+Ventajas frente a los Modelos Básicos
+Modelo
+Limitación en el dominio cinematográfico
+Cómo EBM lo resuelve
+Booleano Clásico
+Resultados binarios sin ranking; búsquedas exactas frustran al usuario
+Produce scores continuos [0,1]; un doc con 2 de 3 términos es más relevante que uno con 0
+Vectorial TF-IDF
+No soporta operadores lógicos explícitos (AND/OR)
+Incorpora lógica booleana con pesos mediante p-norma
+Probabilístico básico
+Complejo de implementar; asume independencia de términos
+EBM es más interpretable; el parámetro p es transparente
+
+En el dominio cinematográfico, consultas como "Nolan bomb" requieren precisión en nombres propios (EBM resuelve bien) combinada con cierta tolerancia si falta un término (p-norma suaviza la rigidez booleana).
+Fuentes bibliográficas: Salton, G., Fox, E. A., & Wu, H. (1983). Extended Boolean information retrieval. Communications of the ACM, 26(11), 1022–1036. Complementada con: Baeza-Yates, R., & Ribeiro-Neto, B. (2011). Modern Information Retrieval (2.ª ed.), Cap. 3–4. Addison-Wesley.
+
+Pregunta 3: ¿Qué módulos opcionales implementaron y cómo se relacionan con su dominio?
+
+Se implementaron dos módulos opcionales, ambos directamente vinculados al dominio cinematográfico:
+Módulo de Recomendación (indexer/recommender.py)
+Un motor de recomendación basado en contenido que calcula películas similares a cualquier resultado de búsqueda. Su relevancia para el dominio es directa: un usuario que busca "Interstellar" probablemente también esté interesado en "Inception" o "The Prestige". El algoritmo híbrido combina similitud coseno sobre los vectores TF-IDF (50%) con similitud estructurada Jaccard sobre géneros y director (50%), capturando tanto la afinidad textual como la estructural.
+Módulo de Evaluación (scripts/evaluate.py)
+Implementa métricas estándar de evaluación de SRI: Precision@5, Recall@5, F1, MRR y NDCG@5 sobre un conjunto de ground truth de 6 consultas especializadas del dominio cinematográfico. La justificación en el dominio es que las consultas de cine tienen respuestas esperadas claras (Oppenheimer para una consulta sobre el Proyecto Manhattan), lo que facilita la construcción de ground truth con alta confianza.
+
+Pregunta 4: Muestren cómo funciona el crawler/scraper. ¿Qué fuentes eligieron, cómo aseguran confiabilidad, cómo respetan robots.txt? ¿Qué URLs semilla definieron? ¿La búsqueda sale del dominio semilla?
+
+Fuentes y Confiabilidad
+Fuente
+Por qué es confiable
+Tipo de contenido
+TMDB API v3
+API oficial con autenticación, más de 500K películas verificadas por comunidad
+Metadatos estructurados certificados
+Metacritic (scraping)
+Medio especializado de referencia global en crítica cinematográfica
+Reseñas extensas y argumentadas de usuarios
+
+Políticas de Crawling
+Rate limiting TMDB: delay de 0.27 segundos entre peticiones (≈37 req/10s), por debajo del límite oficial de 40 req/10s.
+Rate limiting Metacritic: delays aleatorios entre 1.5 y 3.5 segundos, con reintentos limitados y exponential backoff implícito.
+robots.txt: El sistema no verifica explícitamente robots.txt en esta versión del crawler. Es una deficiencia conocida y documentada en el informe técnico como mejora pendiente (implementar Scrapy con RobotsTxtMiddleware habilitado).
+Profundidad de crawling: El crawler de TMDB no realiza crawling web clásico (sigue links), sino que consulta la API paginada. El de Metacritic solo visita la URL del perfil de cada película sin navegar a páginas enlazadas. La profundidad es siempre 1.
+URLs Semilla
+TMDB: https://api.themoviedb.org/3/discover/movie?sort_by=popularity.desc&page={n}
+TMDB calidad: https://api.themoviedb.org/3/discover/movie?vote_average.gte=7.0&vote_count.gte=500&page={n}
+Metacritic: https://www.metacritic.com/movie/{slug}/user-reviews/
+¿Sale del dominio semilla? No. El crawler de TMDB solo consulta la API oficial en tmdb.org. El scraper de Metacritic solo visita metacritic.com. El módulo de búsqueda web (fallback) sí sale del dominio semilla al consultar DuckDuckGo y descargar páginas de cualquier dominio relevante, pero esto ocurre únicamente cuando el corpus local es insuficiente para responder la consulta y sus resultados no se persisten en el índice principal.
+
+Pregunta 5: ¿Cuántos documentos tienen indexados, de qué tipo y cómo garantizan que el corpus es suficiente y representativo?
+
+Métrica
+Valor
+Total de documentos
+1,623 películas
+Tipo de contenido
+Exclusivamente textual (rich_text: sinopsis + reseñas + metadatos)
+Tamaño del vocabulario del índice
+~28,000 términos únicos (normalizados)
+Archivo documents.json
+9.8 MB
+Promedio de reseñas por película
+~3 reseñas de usuario (Metacritic)
+Rango temporal del corpus
+Películas de 1970 a 2025
+
+Garantías de Suficiencia y Representatividad
+Cobertura temporal: el corpus incluye películas de más de 50 años, cubriendo todas las épocas relevantes del cine moderno.
+Cobertura de géneros: las dos estrategias de descubrimiento (popularidad y calidad) garantizan representación de todos los géneros principales (drama, thriller, sci-fi, romance, animación, documental).
+Cobertura de directores: los 50+ directores más prolíficos del cine mundial están representados con múltiples obras.
+Complementariedad de fuentes: la sinopsis oficial de TMDB (vocabulario controlado) se combina con reseñas de usuarios de Metacritic (lenguaje natural diverso), maximizando la cobertura del vocabulario de consultas.
+Fallback web: para consultas sobre películas no indexadas, el sistema activa automáticamente la búsqueda en tiempo real, cubriendo el 100% del espacio de consultas posibles aunque sea sin persistencia.
+
+Pregunta 6: Expliquen cómo funciona la indexación: estructura usada, procesamiento y normalización de datos, tipos de contenido.
+
+La indexación se implementa mediante un Índice Invertido Ponderado (clase InvertedIndex en indexer/inverted_index.py). La estructura es:
+_raw_index: dict[str, dict[int, int]]
+  término_normalizado → { doc_id: term_frequency }
+Pipeline de Normalización de Texto (_tokenize)
+Paso 1 — Minúsculas: todo el texto se convierte a minúsculas para eliminar la distinción mayúscula/minúscula.
+Paso 2 — Tokenización lingüística: nltk.word_tokenize() segmenta el texto respetando contracciones del inglés.
+Paso 3 — Filtro alfanumérico: se descartan tokens que no contengan al menos un carácter [a-z0-9] (elimina puntuación).
+Paso 4 — Eliminación de stopwords: frozenset bilingüe (inglés + español) de NLTK, búsqueda O(1).
+Paso 5 — Stemming: SnowballStemmer para inglés reduce palabras a su raíz morfológica ("directed" → "direct", "films" → "film").
+Sobre el índice invertido se construye la matriz de pesos TF-IDF normalizada del EBM, persistida en data/ebm_weights.json. Adicionalmente, el índice vectorial FAISS se construye codificando el campo rich_text de cada documento con Sentence-Transformers (all-MiniLM-L6-v2), generando vectores densos de 384 dimensiones. El sistema actualmente solo indexa contenido textual; el soporte multimodal (imágenes de carteles) es una extensión futura documentada.
+
+Pregunta 7: ¿Cómo se genera un embedding para información nueva de la web y cómo se almacena? ¿Qué modelo y técnica de búsqueda por similitud usan y por qué?
+
+Generación de Embeddings para Contenido Web
+Cuando el módulo de búsqueda web recupera contenido nuevo (fallback), el flujo de embedding es el siguiente:
+El crawler descarga las páginas web y extrae el texto limpio (BeautifulSoup, eliminando nav, script, footer, etc.).
+El texto se divide en chunks de 600 caracteres con 120 de solapamiento (función chunk_text). El solapamiento evita que contextos relevantes queden partidos entre dos chunks.
+Los chunks se codifican con sentence-transformers/all-MiniLM-L6-v2 usando model.encode(chunk_texts), produciendo vectores de 384 dimensiones.
+Los vectores se normalizan en L2 con faiss.normalize_L2() y se añaden a un VectorStore en modo in_memory=True, un índice FAISS temporal que solo existe durante la vida de la petición HTTP.
+La búsqueda semántica sobre los chunks retorna los 5 más relevantes por similitud de coseno.
+Importante: Los embeddings web NO se persisten en el índice permanente. Los resultados web se presentan al usuario con doc_id ≥ 9000 y la flag is_web_result=True, y el VectorStore temporal es destruido al finalizar la petición.
+Modelo de Embedding y Justificación
+Modelo: all-MiniLM-L6-v2 (Sentence-Transformers). Seleccionado por: (1) optimizado específicamente para sentence similarity, (2) 384 dimensiones —equilibrio entre precisión y eficiencia—, (3) gratuito en HuggingFace Hub, (4) no requiere GPU para corpus de ~1,600 documentos, (5) soporta textos en inglés y español.
+Técnica de Búsqueda por Similitud y Eficiencia
+FAISS IndexFlatIP (producto interno plano): Al normalizar los vectores en L2, el producto interno es matemáticamente equivalente a la similitud de coseno. IndexFlatIP realiza búsqueda exacta (no aproximada) sobre el corpus, garantizando que no se pierden resultados relevantes. Para 1,623 vectores de 384 dims, la búsqueda completa toma del orden de milisegundos, haciendo innecesaria la aproximación (IVF, HNSW). La eficiencia es O(n·d) donde n=vectores y d=dimensiones.
+
+Pregunta 8: ¿Cómo detectan que la información requerida por el usuario no puede ser satisfecha por lo indexado?
+
+El sistema implementa dos criterios complementarios de detección de insuficiencia, evaluados directamente sobre los resultados del EBM local (api/main.py, endpoint /search):
+Criterio 1 — Cuantitativo: Volumen de Resultados
+if len(combined) < 3:
+    # Activar búsqueda web
+Si el EBM recupera menos de 3 documentos con similitud mayor que el umbral mínimo de 1e-6, se considera que el corpus local no tiene información suficiente sobre el tema consultado. 3 resultados es el umbral mínimo para que el usuario perciba una respuesta útil.
+Criterio 2 — Cualitativo: Calidad del Mejor Resultado
+top_score = combined[0].score if combined else 0
+if top_score < 0.25:
+    # Activar búsqueda web
+Un score EBM < 0.25 indica que incluso el mejor resultado local tiene menos del 25% de similitud máxima posible con la consulta. Esto ocurre cuando los términos de la consulta aparecen raramente o no aparecen en el índice (vocabulario fuera del corpus).
+Comportamiento Resultante
+Ambos criterios se evalúan en secuencia (OR lógico): basta con que uno se active para lanzar el fallback. Esto garantiza cobertura tanto en consultas con vocabulario desconocido (criterio 2) como en consultas sobre temas muy específicos con pocos documentos relacionados (criterio 1). El campo was_web_search: bool en la respuesta JSON permite al frontend notificar visualmente al usuario que los resultados provienen parcialmente de la web.
+
+Pregunta 9: Ejecuten una consulta de ejemplo y narren el flujo completo end-to-end: desde que el usuario escribe hasta los resultados.
+
+Consulta de ejemplo: "Christopher Nolan atomic bomb historical drama"
+Flujo Completo
+1. Entrada del usuario: El usuario escribe la consulta en la caja de texto de la interfaz HTML5 (localhost:8000) y pulsa el botón de búsqueda.
+2. Petición HTTP: El JavaScript del frontend realiza un fetch('POST /search', {query: 'Christopher Nolan atomic bomb historical drama', top_k: 10, p: 2.0, ebm_weight: 0.6, vector_weight: 0.4}).
+3. Tokenización: La API tokeniza la consulta con el pipeline NLP: minúsculas → word_tokenize → filtro alfanumérico → stopwords → stemming. Resultado: ["christoph", "nolan", "atom", "bomb", "histor", "drama"].
+4. Motor EBM: ebm.search(query, op='OR') itera sobre los pesos TF-IDF precargados, identifica documentos candidatos (aquellos que contienen alguno de los stems) y aplica la p-norma euclidiana (p=2.0). Oppenheimer, Tenet, Interstellar y otras películas de Nolan aparecen con scores altos.
+5. Posicionamiento: Para cada resultado se añade factor_popularidad (popularidad TMDB × 10%) y factor_frescura (año reciente × 5%). Oppenheimer (2023, alta popularidad) recibe el mayor boost y queda primero.
+6. Evaluación del fallback: El score top es 0.45 y hay 15 resultados → ambos criterios están por encima del umbral. La búsqueda web NO se activa.
+7. Snippet: Para cada resultado, el sistema localiza el stem "atom" en el rich_text y extrae ±200 chars alrededor de la primera ocurrencia.
+8. Respuesta: La API serializa el SearchResponse con los 10 resultados rankeados, scores desglosados y snippets, y lo devuelve como JSON.
+9. Renderizado: El JavaScript procesa el JSON y renderiza cada resultado con título, año, score combinado (EBM + vector), director, géneros y snippet. El usuario ve Oppenheimer primero.
+10. RAG opcional: Si el usuario hace clic en "Respuesta inteligente", el frontend envía POST /chat con la query y los resultados. rag_manager.generate_response() construye el prompt con los metadatos de las películas y lo envía a Llama3-8b-8192 via Groq API. La respuesta generada se muestra en la interfaz.
+
+Pregunta 10: Demuestren el módulo RAG: cómo recupera documentos, los pasa al generador, produce respuesta. ¿Cómo evita alucinaciones?
+
+Arquitectura RAG Implementada
+El módulo RAG (api/rag.py) sigue el paradigma clásico Retrieve → Augment → Generate:
+Retrieve: El endpoint /search ejecuta el motor EBM y retorna los top-k resultados rankeados por score combinado.
+Augment: El método _format_context(retrieved_docs) serializa cada resultado en un bloque de texto: Título, Año, Director, Reparto, Géneros, Score de Relevancia y Snippet. Este contexto se inyecta en el System Prompt del LLM.
+Generate: El LLM (Llama3-8b-8192 vía Groq API, temperatura=0.2) recibe el system prompt con contexto + la pregunta del usuario y genera la respuesta.
+Mecanismos Anti-Alucinación
+Instrucción explícita en el System Prompt: "Responde EXCLUSIVAMENTE basándote en el contexto proporcionado. Si la información no está en el contexto, indícalo cortésmente."
+Temperatura baja (0.2): reduce la aleatoriedad de la generación, favoreciendo respuestas más conservadoras y apegadas al contexto.
+Instrucción de citación: el prompt obliga al LLM a citar el título y año de la película al mencionar cualquier dato, lo que hace las alucinaciones verificables por el usuario.
+El sistema pasa únicamente los documentos rankeados como contexto, no una representación completa de la base de datos; esto limita el espacio de información disponible para el LLM.
+Información Pasada al Generador
+Por cada película recuperada se incluye: título, año, director, reparto principal (top-5), géneros, score de relevancia y snippet contextual. El score de relevancia informa al LLM sobre cuál fuente es más confiable. Los resultados se pasan en orden de score descendente (el más relevante primero), permitiendo al LLM priorizar la información de mayor calidad.
+
+Pregunta 11: Provoquen el caso de BD insuficiente y muestren activación automática de búsqueda web. Criterio, incorporación al ranking e indexación futura.
+
+Cómo Provocar el Caso
+Se puede provocar consultando un tema muy específico sin representación en el corpus, por ejemplo: "Película documental sobre el mercado de derivados financieros de 2010". Al ejecutar esta consulta:
+El EBM devuelve 0-2 resultados con score < 0.25 (términos financieros no están en el vocabulario cinematográfico del corpus).
+Se activa el módulo WebSearchModule.search_and_format().
+Flujo Completo del Fallback Web
+1. Búsqueda DuckDuckGo: DDGS().text(query, max_results=5) retorna los 5 resultados más relevantes con título, snippet y URL.
+2. Crawling concurrente: ThreadPoolExecutor(max_workers=5) descarga las páginas en paralelo con timeout=4s. BeautifulSoup extrae el texto limpio eliminando elementos UI (nav, footer, script).
+3. Chunking: chunk_text(text, chunk_size=600, overlap=120) divide cada página en segmentos manejables con solapamiento.
+4. Indexación temporal: VectorStore(in_memory=True) codifica los chunks con Sentence-Transformers y los indexa en FAISS en memoria.
+5. Búsqueda semántica: temp_v_store.search(query, top_k=5) retorna los 5 chunks más relevantes con sus scores de coseno.
+6. Formato de resultados: Los resultados web se empaquetan con doc_id ≥ 9000, is_web_result=True, vector_score del chunk, y snippet con la URL fuente.
+Incorporación al Ranking Final
+Los resultados web se añaden a la lista de resultados locales (combined.extend(web_objects)) y el ranking se recalcula ordenando por score descendente. Esto puede posicionar resultados web por encima de resultados locales débiles si su score semántico es mayor.
+Indexación para uso futuro: En la versión actual, los resultados web NO se persisten. Es una deficiencia documentada: para implementar la indexación futura se requeriría un pipeline de ingesta en background (Celery + Redis) que procese y añada los chunks web al DocumentStore, InvertedIndex y VectorStore permanentes tras cada consulta con fallback.
+
+Pregunta 12: Muestren la interfaz visual y expliquen las decisiones de diseño sobre el posicionamiento de resultados.
+
+Descripción de la Interfaz
+La interfaz es una SPA (Single Page Application) HTML5 servida por FastAPI en localhost:8000. Incluye: caja de búsqueda central, parámetros avanzados (top_k, factor EBM/vectorial), tarjetas de resultado y panel de respuesta RAG.
+Decisiones de Posicionamiento Visual
+Orden de resultados: Los resultados se presentan de mayor a menor score_final. El primero de la lista es siempre el de mayor relevancia combinada (EBM + popularidad + frescura). Esta convención sigue el estándar esperado por los usuarios de motores de búsqueda.
+Desglose de scores visible: Cada tarjeta muestra EBM score, vector score y score combinado. Esto permite al usuario avanzado entender por qué un resultado está primero, favoreciendo la confianza en el sistema.
+Snippet contextual (no truncado fijo): El snippet se extrae alrededor de la primera ocurrencia del término de la consulta en el documento, no desde el inicio. Esto maximiza la relevancia del fragmento mostrado.
+Distinción visual resultados web: Los resultados provenientes de la búsqueda web (is_web_result=True) se distinguen visualmente para que el usuario sepa que son externos al corpus permanente.
+Tipo de posicionamiento: El sistema implementa posicionamiento por relevancia multifactorial (Relevance Ranking): score léxico (EBM) + semántico (vectorial) + popularidad contextual + frescura temporal.
+
+Pregunta 13: ¿Qué factores entran en el ranking además de la relevancia? Muestren dos consultas donde cambie el orden.
+
+El algoritmo de ranking final incorpora tres factores aditivos:
+Factor
+Fórmula
+Peso efectivo
+Fuente del dato
+Relevancia EBM
+score_EBM (p-norma)
+~85%
+Índice invertido + TF-IDF
+Popularidad
+min(1.0, pop/100) × 0.10
+Hasta 10%
+TMDB metadata.popularity
+Frescura
+max(0, 1−(año_actual−año)/50) × 0.05
+Hasta 5%
+TMDB metadata.year
+
+Ejemplo 1: Consulta donde la popularidad altera el orden
+"Christopher Nolan film": Dos películas con EBM score similar —Oppenheimer (0.34) y The Dark Knight (0.33)— quedan separadas porque Oppenheimer tiene popularity=120 (TMDB), añadiendo +0.10 al score, mientras The Dark Knight tiene popularity=90, añadiendo +0.09. El resultado: Oppenheimer queda primero pese a EBM similar.
+Ejemplo 2: Consulta donde la frescura altera el orden
+"animated film Oscar winner": Dos películas con EBM score idéntico —Soul (2020, +0.05 frescura) y Ratatouille (2007, +0.019 frescura)— quedan ordenadas por año: Soul primero, Ratatouille segundo. Sin el factor frescura, el orden sería arbitrario (orden de inserción en el índice).
+
+Pregunta 14: Si implementaron expansión de consultas y retroalimentación, ¿cómo actúan?
+
+El módulo de expansión de consultas y retroalimentación por relevancia no está implementado en la versión actual del sistema. Esta funcionalidad forma parte de los módulos opcionales descritos en la orientación (Módulo de expansión y retroalimentación) y no fue seleccionada en la planificación del Corte 2.
+De haber sido implementada, la arquitectura contemplada sería:
+Pseudo-Relevance Feedback (PRF — Rocchio): Tras recuperar los top-k documentos, se identifican los términos más frecuentes en los resultados relevantes y se añaden a la consulta original con un peso decreciente (α × q_original + β × centroide_relevantes). El nuevo vector de consulta amplía el espacio de búsqueda.
+Expansión con WordNet: Sinónimos y términos relacionados de los términos originales se añaden a la consulta (ej: "war" → ["conflict", "battle", "combat"]), mejorando el recall sin modificar la intención del usuario.
+Retroalimentación explícita: El usuario marcaría resultados como relevantes/irrelevantes desde la interfaz, retroalimentando el vector de consulta para refinar los resultados iterativamente.
+
+Pregunta 15: Si implementaron el módulo de evaluación, muestren los resultados cuantitativos.
+
+El módulo de evaluación formal (scripts/evaluate.py) está implementado como módulo opcional. Se evalúa sobre un ground truth de 6 consultas expertas del dominio cinematográfico (data/ground_truth.json).
+Resultados Cuantitativos (k=5)
+Métrica
+Resultado
+Interpretación detallada
+Mean Precision@5
+0.1667
+1 de cada 6 documentos en el Top-5 es explícitamente relevante (limitado por el ground truth pequeño)
+Mean Recall@5
+0.7500
+El sistema recupera el 75% de todos los documentos relevantes existentes en el Top-5
+Mean F1
+0.2698
+Balance armónico; refleja el trade-off del ground truth de 1 doc relevante por consulta
+Mean MRR
+0.8472
+El primer resultado relevante aparece en promedio en el puesto 1.18 de la lista
+Mean NDCG@5
+0.7689
+El 76.89% de la calidad de ranking óptima es alcanzada por el sistema
+
+El salto de calidad respecto al Corte 2 (NDCG de 0.6081 → 0.7689; MRR de 0.6071 → 0.8472) se debe principalmente a la incorporación de los factores de popularidad y frescura en el posicionamiento, que resuelven los empates EBM entre películas semánticamente equivalentes.
+
+Pregunta 16: ¿Qué deficiencias detectaron y cómo las resolverían? ¿Qué harían distinto si empezaran de cero?
+
+Deficiencias Detectadas
+Deficiencia
+Impacto
+Solución propuesta
+Ground truth pequeño (6 consultas)
+Métricas de evaluación estadísticamente débiles
+50–100 consultas con evaluadores humanos o crowdsourcing (MTurk)
+Sin verificación de robots.txt
+Posible incumplimiento de políticas de crawling
+Scrapy con RobotsTxtMiddleware; lista de sitios excluidos
+Resultados web no persistidos
+Cada consulta con fallback recrawlea la misma información
+Pipeline de ingesta en background (Celery + Redis)
+Sin expansión de consultas
+Consultas cortas o ambiguas tienen recall bajo
+Pseudo-Relevance Feedback (Rocchio) o expansión con WordNet/BERT
+Sin perfil de usuario
+Recomendación puramente de contenido, sin personalización
+Filtrado colaborativo (matrix factorization NCF) + historial de sesión
+Corpus no multimodal
+No soporta búsqueda por imágenes de carteles
+CLIP embeddings para representación imagen-texto unificada
+GROQ_API_KEY obligatoria para RAG
+El módulo RAG falla silenciosamente sin configuración
+LLM local open-source (Ollama + Llama3 local) como alternativa gratuita
+
+¿Qué haríamos distinto comenzando de cero?
+Diseñar el ground truth desde el inicio del proyecto (Corte 1), con al menos 50 consultas, para que la evaluación formal del Corte 3 sea estadísticamente significativa.
+Usar Scrapy como framework de crawling desde el principio (gestión automática de robots.txt, rate limiting configurable, pipeline de procesamiento, manejo de errores robusto).
+Implementar la expansión de consultas con WordNet desde el Corte 1 como parte del pipeline de tokenización, ya que tiene bajo costo de implementación y alto impacto en recall.
+Diseñar la arquitectura de almacenamiento con una base de datos documental real (MongoDB, Elasticsearch) en lugar de JSON, para soportar actualizaciones incrementales sin recargar todo el corpus en memoria.
+Incluir desde el inicio un módulo de logging de consultas que permita construir automáticamente datasets de evaluación y análisis de patrones de uso.
+Usar un LLM local (Ollama + Llama3) en lugar de una API externa de pago para evitar dependencias en el despliegue y garantizar reproducibilidad total en cualquier entorno.

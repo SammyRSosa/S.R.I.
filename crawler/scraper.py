@@ -106,7 +106,7 @@ class MetacriticReviewScraper:
 
     def __init__(self, warmup: bool = True) -> None:
         """
-        Inicializa la sesión de curl_cffi con impersonación del navegador.
+        Inicializa la sesión de curl_cffi con impersonación del navegador y el validador de robots.txt.
         
         Initialization Model:
         $$\mathcal{S}_{session} = \text{Session}(\text{impersonate} = \text{"chrome124"})$$
@@ -115,8 +115,57 @@ class MetacriticReviewScraper:
         self._s = Session(impersonate=IMPERSONATE)
         self._s.headers.update(CHROME_HEADERS)
 
+        # ─── Inicialización de Robots.txt (Requerimiento de Cátedra) ──────────
+        from urllib.robotparser import RobotFileParser
+        self._rp = RobotFileParser()
+        self._rp.set_url(BASE_URL + "/robots.txt")
+        self._robots_loaded = False
+
         if warmup:
             self._warmup()
+
+    # ─── Robots.txt Compliance (Cálculo e Integridad Ética) ───────────────────
+
+    def _load_robots_txt(self) -> None:
+        """
+        Descarga y parsea el archivo robots.txt de Metacritic.
+        Utiliza la misma sesión curl_cffi impersonada para no ser bloqueada por Cloudflare.
+        """
+        if self._robots_loaded:
+            return
+
+        logger.info("[Robots.txt] Cargando directivas de robots.txt desde Metacritic...")
+        try:
+            resp = self._s.get(BASE_URL + "/robots.txt", timeout=10)
+            if resp.status_code == 200:
+                lines = resp.text.splitlines()
+                self._rp.parse(lines)
+                self._robots_loaded = True
+                logger.info("[Robots.txt] ✓ Archivo robots.txt descargado y parseado con éxito.")
+            else:
+                logger.warning(
+                    "[Robots.txt] ⚠️ Error de status %d al obtener robots.txt. Usando políticas permisivas.",
+                    resp.status_code
+                )
+        except Exception as e:
+            logger.error("[Robots.txt] ⚠️ Excepción al parsear robots.txt: %s. Usando políticas permisivas.", e)
+
+    def _can_fetch(self, url: str) -> bool:
+        """
+        Comprueba si la URL indicada está permitida por robots.txt para el User-Agent.
+        """
+        try:
+            self._load_robots_txt()
+            if not self._robots_loaded:
+                return True
+            
+            user_agent = CHROME_HEADERS["User-Agent"]
+            allowed = self._rp.can_fetch(user_agent, url)
+            logger.debug("[Robots.txt] Validación de URL: %s | Permitida: %s", url, allowed)
+            return allowed
+        except Exception as e:
+            logger.warning("[Robots.txt] Fallo en verificación: %s. Permitido por defecto.", e)
+            return True
 
     # ─── Sesión ───────────────────────────────────────────────────────────────
 
@@ -319,63 +368,74 @@ class MetacriticReviewScraper:
         seed_url = f"{BASE_URL}/search/{slug}/"
         logger.info("  [1] Seed URL de busqueda: %s", seed_url)
         
-        html_search = self._get(seed_url, label=f"search:{slug}")
+        html_search = None
         movie_url = None
         
-        if html_search:
-            # ── PASO 2: Extracción y análisis de enlaces en página de búsqueda ────
-            soup_search = BeautifulSoup(html_search, "lxml")
-            links = soup_search.find_all("a", href=True)
-            logger.info("  [2] Extraidos %d enlaces de la busqueda. Analizando...", len(links))
-            
-            for link in links:
-                href = link["href"]
-                # A: Resolución de URL usando la URL donde fue encontrada como referencia (Carlos's requirement)
-                abs_url = urljoin(seed_url, href)
-                parsed = urlparse(abs_url)
+        # Verificar cumplimiento de robots.txt
+        if self._can_fetch(seed_url):
+            html_search = self._get(seed_url, label=f"search:{slug}")
+            if html_search:
+                # ── PASO 2: Extracción y análisis de enlaces en página de búsqueda ────
+                soup_search = BeautifulSoup(html_search, "lxml")
+                links = soup_search.find_all("a", href=True)
+                logger.info("  [2] Extraidos %d enlaces de la busqueda. Analizando...", len(links))
                 
-                # B: Análisis de dominio: ¿es interno o sale del dominio?
-                is_internal = self._is_internal(abs_url)
-                if not is_internal:
-                    # C: Elección: elegir no salir de metacritic.com
-                    continue
+                for link in links:
+                    href = link["href"]
+                    # A: Resolución de URL usando la URL donde fue encontrada como referencia (Carlos's requirement)
+                    abs_url = urljoin(seed_url, href)
+                    parsed = urlparse(abs_url)
                     
-                # D: Análisis de ruta/heurística de película
-                link_text = link.get_text(strip=True)
-                if self._is_movie_match(parsed.path, link_text, title, year):
-                    movie_url = abs_url
-                    logger.info("  -> Descubierto enlace de pelicula coincidente: %s (Texto: '%s')", movie_url, link_text)
-                    break
-        
-        # Fallback de seguridad si el crawling de búsqueda no dio resultados o falló
+                    # B: Análisis de dominio: ¿es interno o sale del dominio?
+                    is_internal = self._is_internal(abs_url)
+                    if not is_internal:
+                        # C: Elección: elegir no salir de metacritic.com
+                        continue
+                        
+                    # D: Análisis de ruta/heurística de película
+                    link_text = link.get_text(strip=True)
+                    if self._is_movie_match(parsed.path, link_text, title, year):
+                        movie_url = abs_url
+                        logger.info("  -> Descubierto enlace de pelicula coincidente: %s (Texto: '%s')", movie_url, link_text)
+                        break
+        else:
+            logger.info("  [Robots.txt] ⚠️ Seed URL '%s' desautorizada en robots.txt. Evitando peticion por compliance ético.", seed_url)
+            logger.info("  [Robots.txt] → Activando de inmediato la heurística de ruta directa autorizada por el protocolo.")
+
+        # Fallback de seguridad si el crawling de búsqueda no dio resultados o fue bloqueado
         if not movie_url:
             fallback_slug = f"{slug}-{year}" if year else slug
             movie_url = f"{BASE_URL}/movie/{fallback_slug}/"
             logger.warning("  -> Fallback: no se descubrio el enlace por busqueda. Probando ruta directa: %s", movie_url)
 
         # ── PASO 3: Crawler viaja a la página de detalles y busca user reviews ─
-        logger.info("  [3] Crawleando pagina de detalles: %s", movie_url)
-        html_details = self._get(movie_url, label="details")
+        html_details = None
         user_reviews_url = None
         
-        if html_details:
-            soup_details = BeautifulSoup(html_details, "lxml")
-            details_links = soup_details.find_all("a", href=True)
+        if self._can_fetch(movie_url):
+            logger.info("  [3] Crawleando pagina de detalles: %s", movie_url)
+            html_details = self._get(movie_url, label="details")
             
-            for link in details_links:
-                href = link["href"]
-                abs_url = urljoin(movie_url, href)
+            if html_details:
+                soup_details = BeautifulSoup(html_details, "lxml")
+                details_links = soup_details.find_all("a", href=True)
                 
-                # Comprobación de dominio
-                if not self._is_internal(abs_url):
-                    continue
+                for link in details_links:
+                    href = link["href"]
+                    abs_url = urljoin(movie_url, href)
                     
-                # Comprobación de ruta de user-reviews
-                parsed = urlparse(abs_url)
-                if "/user-reviews/" in parsed.path or parsed.path.endswith("/user-reviews"):
-                    user_reviews_url = abs_url
-                    logger.info("  -> Descubierto enlace de reseñas de usuario: %s", user_reviews_url)
-                    break
+                    # Comprobación de dominio
+                    if not self._is_internal(abs_url):
+                        continue
+                        
+                    # Comprobación de ruta de user-reviews
+                    parsed = urlparse(abs_url)
+                    if "/user-reviews/" in parsed.path or parsed.path.endswith("/user-reviews"):
+                        user_reviews_url = abs_url
+                        logger.info("  -> Descubierto enlace de reseñas de usuario: %s", user_reviews_url)
+                        break
+        else:
+            logger.warning("  [Robots.txt] ❌ URL de detalles '%s' bloqueada por robots.txt.", movie_url)
 
         # Fallback de seguridad si no se descubrió el enlace en la página de detalles
         if not user_reviews_url:
@@ -383,15 +443,18 @@ class MetacriticReviewScraper:
             logger.warning("  -> Fallback: no se encontro enlace de reseñas en la pagina. Probando: %s", user_reviews_url)
 
         # ── PASO 4: Crawler viaja a la página de reseñas y extrae ─────────────
-        logger.info("  [4] Crawleando pagina de reseñas de usuario: %s", user_reviews_url)
-        html_reviews = self._get(user_reviews_url, label="reviews")
-        
-        if html_reviews:
-            reviews = self._parse_reviews(html_reviews, max_reviews)
-            if reviews:
-                logger.info("  -> Total: %d reseñas ricas (Metacritic)", len(reviews))
-                return reviews
-                
+        if self._can_fetch(user_reviews_url):
+            logger.info("  [4] Crawleando pagina de reseñas de usuario: %s", user_reviews_url)
+            html_reviews = self._get(user_reviews_url, label="reviews")
+            
+            if html_reviews:
+                reviews = self._parse_reviews(html_reviews, max_reviews)
+                if reviews:
+                    logger.info("  -> Total: %d reseñas ricas (Metacritic)", len(reviews))
+                    return reviews
+        else:
+            logger.warning("  [Robots.txt] ❌ URL de reseñas '%s' bloqueada por robots.txt.", user_reviews_url)
+            
         logger.warning("  -> Sin reseñas localizadas tras el proceso de crawling.")
         return []
 

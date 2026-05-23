@@ -282,7 +282,7 @@ class VectorStore:
         return results
         
     def save(self) -> None:
-        """
+        r"""
         Persiste el índice binario de FAISS y el mapeo biyectivo en disco de forma transaccional.
         
         Flow:
@@ -304,7 +304,7 @@ class VectorStore:
             logger.error("Error al guardar VectorStore: %s", e)
             
     def load(self) -> None:
-        """
+        r"""
         Carga el índice binario y reconstruye los mapeos bidireccionales en memoria.
         
         Algorithms:

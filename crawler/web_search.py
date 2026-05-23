@@ -171,16 +171,66 @@ def generate_smart_snippet(text: str, query: str) -> str:
     return snippet
 
 
+# Cache global en memoria para no descargar robots.txt repetidamente por el mismo dominio externo
+ROBOTS_CACHE: dict[str, RobotFileParser] = {}
+
+def can_fetch_external(url: str) -> bool:
+    """
+    Verifica si una URL externa está permitida por su respectivo archivo robots.txt.
+    Descarga y parsea el robots.txt en vivo con un timeout corto de 2.0 segundos.
+    """
+    from urllib.robotparser import RobotFileParser
+    from urllib.parse import urlparse
+    
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return True
+            
+        domain = f"{parsed.scheme}://{parsed.netloc}"
+        
+        # Consultar cache en memoria
+        if domain in ROBOTS_CACHE:
+            rp = ROBOTS_CACHE[domain]
+        else:
+            logger.debug("[Robots.txt-Web] Descargando robots.txt para el dominio externo: %s", domain)
+            rp = RobotFileParser()
+            rp.set_url(f"{domain}/robots.txt")
+            
+            # Timeout corto de 2s para no degradar el tiempo de respuesta semántica de la API
+            r = requests.get(f"{domain}/robots.txt", headers=HEADERS, timeout=2.0)
+            if r.status_code == 200:
+                rp.parse(r.text.splitlines())
+            else:
+                # Si robots.txt no existe o da error, asumimos permitido
+                rp.parse(["User-agent: *", "Allow: /"])
+            ROBOTS_CACHE[domain] = rp
+            
+        user_agent = HEADERS["User-Agent"]
+        allowed = rp.can_fetch(user_agent, url)
+        logger.debug("[Robots.txt-Web] Validación de URL externa: %s | Permitida: %s", url, allowed)
+        return allowed
+    except Exception as e:
+        logger.warning("[Robots.txt-Web] Fallo al verificar robots.txt para %s: %s. Permitido por defecto.", url, e)
+        return True
+
+
 def fetch_url(url: str, title: str) -> Optional[Dict[str, Any]]:
     """
     HTML HTTP ACQUISITION AND CONTEXT EXTRACTION
     ============================================
     Downloads remote resource via standard HTTP GET with timeout constraints to avoid blocking threads.
+    Verifies compliance against external domain robots.txt rules before requesting.
     
     Network Safety:
       - Timeout: $\tau = 8.0$ seconds.
       - Status Verification: Returns clean parsed text only on HTTP 200.
     """
+    # ── Verificar cumplimiento de robots.txt (Requerimiento de Cátedra) ──
+    if not can_fetch_external(url):
+        logger.warning("[Robots.txt-Web] ❌ URL externa desautorizada por robots.txt: %s. Saltando descarga.", url)
+        return None
+
     try:
         logger.info(f"Crawler descargando página: {url}")
         r = requests.get(url, headers=HEADERS, timeout=8.0)
