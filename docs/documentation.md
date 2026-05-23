@@ -115,5 +115,26 @@ Hola! Te explico paso a paso el flujo completo de funcionamiento de esta aplicac
 - **Web Search**: DuckDuckGo Search API.
 - **Idioma**: Soporte para consultas en Español/Inglés.
 
+#### 8. **Despliegue y Reproducibilidad con Docker**
+El sistema está completamente dockerizado para garantizar la máxima reproducibilidad académica y facilitar su ejecución en máquinas externas sin configuraciones previas de Python o dependencias nativas (como FAISS).
 
-Si quieres profundizar en alguna parte (ej.: cómo funciona exactamente el EBM o ver código de un módulo específico), ¡dímelo! También puedo ejecutar pruebas o mostrar ejemplos de consultas. 😊
+- **Dockerfile de Producción Multietapa**:
+  - **Etapa 1 (`builder`)**: Usa `python:3.11-slim` para instalar librerías compilando librerías de C (como `lxml`) e instala las dependencias de `requirements.txt`. Además, descarga preventivamente todos los datasets y tokenizadores de `NLTK` (`punkt`, `punkt_tab`, `stopwords`) en `/install/nltk_data` para evitar llamadas de red lentas o fallos en caliente.
+  - **Etapa 2 (`runtime`)**: Genera la imagen final ultraligera copiando únicamente los paquetes de Python ya instalados y los recursos de NLTK de la etapa previa, exponiendo el puerto `8000`.
+
+- **Pasos para Ejecutar con Docker**:
+  1. **Construir la imagen local**:
+     ```bash
+     docker build -t oscar-insight:latest .
+     ```
+  2. **Ejecutar el contenedor con volumen de persistencia y variables de entorno**:
+     - *Linux / macOS*:
+       ```bash
+       docker run -d -p 8000:8000 --env-file .env -v $(pwd)/data:/app/data --name oscar-insight-app oscar-insight:latest
+       ```
+     - *Windows (PowerShell)*:
+       ```powershell
+       docker run -d -p 8000:8000 --env-file .env -v ${PWD}/data:/app/data --name oscar-insight-app oscar-insight:latest
+       ```
+  3. **Acceso al sistema**:
+     Abra `http://localhost:8000/` en el navegador para interactuar con la interfaz visual.

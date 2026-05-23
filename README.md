@@ -52,16 +52,65 @@ Para que el sistema sea operativo, se deben generar los índices TF-IDF y Vector
 python scripts/build_corte2.py
 ```
 
-### 3.4 Ejecución de la API y UI
+### 3.4 Ejecución Local de la API y UI
 ```bash
-# Iniciar el servidor
+# Iniciar el servidor local
 uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
 Una vez iniciado, acceda a:
 - **Interfaz Visual (UI)**: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
 - **Documentación API**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
+### 3.5 Despliegue con Docker
+El proyecto cuenta con un `Dockerfile` multietapa optimizado que empaqueta las dependencias de Python y pre-descarga los corpus lingüísticos de `NLTK` en la etapa de compilación para garantizar la velocidad de arranque.
+
+Siga los siguientes pasos para construir y ejecutar el contenedor:
+
+1. **Construir la imagen de Docker**:
+   ```bash
+   docker build -t oscar-insight:latest .
+   ```
+
+2. **Ejecutar el contenedor**:
+   Dado que el sistema requiere variables de entorno (como `GROQ_API_KEY` para el módulo RAG) y persiste su base de datos de películas e índices en el directorio `/app/data` del contenedor, debe pasar sus credenciales y montar un volumen para garantizar la persistencia física de los datos.
+
+   * **En Linux o macOS (Bash)**:
+     ```bash
+     docker run -d \
+       -p 8000:8000 \
+       --env-file .env \
+       -v $(pwd)/data:/app/data \
+       --name oscar-insight-app \
+       oscar-insight:latest
+     ```
+
+   * **En Windows (PowerShell)**:
+     ```powershell
+     docker run -d `
+       -p 8000:8000 `
+       --env-file .env `
+       -v ${PWD}/data:/app/data `
+       --name oscar-insight-app `
+       oscar-insight:latest
+     ```
+
+   * **Pasando las claves de API directamente**:
+     ```bash
+     docker run -d \
+       -p 8000:8000 \
+       -e GROQ_API_KEY="tu_clave_de_groq" \
+       -e TMDB_API_KEY="tu_clave_de_tmdb" \
+       -v $(pwd)/data:/app/data \
+       --name oscar-insight-app \
+       oscar-insight:latest
+     ```
+
+3. **Verificar el contenedor**:
+   * Acceda desde su navegador web a `http://localhost:8000/`.
+   * Verifique el estado de carga del corpus consumiendo el healthcheck: `curl http://localhost:8000/health`.
+
 ---
+
 
 ## 4. Verificación del Sistema
 
