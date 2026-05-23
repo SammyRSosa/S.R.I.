@@ -73,7 +73,7 @@ Hola! Te explico paso a paso el flujo completo de funcionamiento de esta aplicac
 #### 3. **Fase de Almacenamiento (Database)**
    - **Objetivo**: Persistir los documentos y el índice en disco para acceso rápido.
    - **Componentes**:
-     - **DocumentStore**: Almacena documentos en documents.json (JSON con ~1,623 películas).
+     - **DocumentStore**: Almacena documentos en documents.json (JSON con ~1,650 películas).
      - **Checkpoint**: Sistema para reanudar procesos interrumpidos (guarda estado en checkpoint.json).
      - **VectorStore**: Para búsqueda semántica, usa embeddings (representaciones vectoriales) con FAISS (librería de búsqueda aproximada). Convierte el rich_text en vectores y permite búsquedas por similitud coseno.
    - **Herramientas**: store.py, checkpoint.py, vector_store.py.

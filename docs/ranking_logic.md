@@ -35,4 +35,5 @@ $Score = S_{Hibrido} + (0.1 \cdot Pop) + (0.05 \cdot Fresh)$
 ---
 
 ## 4. Implementación del Fallback
-Cuando el sistema detecta que el **Top 1 Score** es inferior a **0.25**, se activa el módulo de búsqueda web. Esto garantiza que el usuario siempre reciba información relevante, incluso si el corpus local (1,623 docs) es insuficiente para la consulta específica.
+Cuando el sistema detecta que el **Top 1 Score** es inferior a **0.15**, se activa el módulo de búsqueda web. Esto garantiza que el usuario siempre reciba información relevante, incluso si el corpus local (1,650 docs) es insuficiente para la consulta específica.
+

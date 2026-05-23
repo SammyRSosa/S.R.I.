@@ -82,7 +82,7 @@ El sistema evita "valores mágicos" (hardcoded) permitiendo la configuración de
 
 - **Parámetro $p$**: Ajustable en la consulta (default 2.0). Controla la "estrictez" booleana.
 - **Pesos Híbridos**: La API permite balancear la importancia del modelo EBM vs Vectores (default 0.6 / 0.4).
-- **Modelo de Lenguaje**: Utiliza `all-MiniLM-L6-v2`, configurable en `VectorStore` para balancear velocidad y precisión.
+- **Modelo de Lenguaje**: Utiliza `paraphrase-multilingual-MiniLM-L12-v2`, el cual soporta alineación semántica multilingüe real (español/inglés).
 
 ---
 

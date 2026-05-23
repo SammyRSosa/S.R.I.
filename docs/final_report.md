@@ -52,7 +52,7 @@ El núcleo de indexación procesa el texto mediante tokenización, eliminación 
 1. **Extended Boolean Model (EBM)**: Modela las consultas mediante lógica booleana suave utilizando la $p$-norma ($p=2.0$). Para una consulta del tipo "A OR B", el score booleano extendido del documento $d$ se calcula como:
    $$S_{EBM}(d, q_{OR}) = \left( \frac{w_A^2 + w_B^2}{2} \right)^{1/2}$$
    Donde $w_t$ representa el peso TF-IDF del término $t$ en el documento. Esto permite recuperar documentos relevantes incluso si omiten parte de los términos lógicos, asignando relevancia de acuerdo a la distancia al origen.
-2. **Vector Store (FAISS)**: Codifica la semántica profunda de reviews y sinopsis con embeddings densos (`all-MiniLM-L6-v2`) de 384 dimensiones. El índice de indexación vectorial se gestiona mediante FAISS (`faiss-cpu`) calculando similitud por distancia coseno.
+2. **Vector Store (FAISS)**: Codifica la semántica profunda de reviews y sinopsis con embeddings densos (`paraphrase-multilingual-MiniLM-L12-v2`) de 384 dimensiones. El índice de indexación vectorial se gestiona mediante FAISS (`faiss-cpu`) calculando similitud por distancia coseno.
 
 ### 2.3 Posicionamiento y Ranking Avanzado
 Para cumplir con los criterios de relevancia específicos del dominio cinematográfico, el score bruto de recuperación se refina mediante un algoritmo de posicionamiento que combina factores textuales, semánticos y señales externas de calidad:
@@ -62,7 +62,7 @@ $$Score(d) = \left( 0.6 \cdot S_{EBM}(d) + 0.4 \cdot S_{VEC}(d) \right) + 0.1 \c
 
 ### 2.4 Módulo RAG y Fallback de Búsqueda Web
 * **Módulo RAG**: Los documentos recuperados de mayor puntaje son estructurados dinámicamente en formato JSON y enviados a la API de Groq alimentando a `Llama-3.3-70b-Versatile`. El sistema genera respuestas naturales, precisas y contextuales sobre el corpus.
-* **Módulo Web Fallback**: Si el corpus local de 1,623 películas es insuficiente para la consulta (disparado cuando el sistema detecta que el mejor resultado local tiene un Score < 0.25 o se recuperan menos de 3 películas), el sistema ejecuta una búsqueda asíncrona vía DuckDuckGo. Los resultados de la web se integran y ordenan de manera homogénea con los locales, y son sintetizados por la IA de forma transparente para el usuario.
+* **Módulo Web Fallback**: Si el corpus local de 1,650 películas es insuficiente para la consulta (disparado cuando el sistema detecta que el mejor resultado local tiene un Score < 0.25 o se recuperan menos de 3 películas), el sistema ejecuta una búsqueda asíncrona vía DuckDuckGo. Los resultados de la web se integran y ordenan de manera homogénea con los locales, y son sintetizados por la IA de forma transparente para el usuario.
 
 ### 2.5 Módulo de Recomendación basado en Contenido (Híbrido)
 El sistema incorpora un motor de recomendación híbrido basado en contenido implementado en `MovieRecommender`. Permite descubrir películas similares a una película semilla dada un `doc_id` combinando dos dimensiones:

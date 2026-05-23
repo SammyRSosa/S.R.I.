@@ -28,7 +28,7 @@ Hola! Te explico con detalles la fase de almacenamiento, que es crucial para per
 La fase de almacenamiento persiste el corpus de películas y el índice invertido en disco, usando JSON para simplicidad y portabilidad (sin bases de datos externas). Se ejecuta durante la población (populate_tmdb.py) y al guardar la app.
 
 - **Archivos Generados**:
-  - documents.json: Corpus de películas (~1,623 docs).
+  - documents.json: Corpus de películas (~1,650 docs).
   - index.json: Índice invertido serializado.
   - ebm_weights.json: Pesos TF-IDF para el EBM.
   - faiss_index.bin: Índice vectorial (FAISS).
@@ -80,7 +80,7 @@ VectorStore es un módulo que gestiona la indexación y búsqueda semántica (ba
 Un **embedding** (o "incrustación") es una representación vectorial numérica (lista de floats) de texto, que captura significado semántico. Palabras/conceptos similares tienen vectores cercanos (medido por similitud coseno).
 
 - **¿Cómo se Generan?**
-  - Usa **Sentence-Transformers** con modelo `all-MiniLM-L6-v2` (384 dimensiones, ligero y rápido).
+  - Usa **Sentence-Transformers** con modelo `paraphrase-multilingual-MiniLM-L12-v2` (384 dimensiones, ligero y rápido).
   - Proceso: `model.encode(text)` → vector de 384 floats, normalizado (L2) para similitud coseno.
 
 - **¿Cómo se Utilizan en el Proyecto?**
