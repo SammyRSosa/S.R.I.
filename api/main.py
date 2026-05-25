@@ -301,7 +301,13 @@ async def search(request: SearchRequest):
     top_combined = combined[0].score if combined else 0
     if len(combined) < 3 or top_combined < 0.15:
         logger.info("Activando Web Fallback: %d resultados locales, top_combined=%.3f", len(combined), top_combined)
-        web_results = web_searcher.search_and_format(query)
+        web_results = web_searcher.search_and_format(
+            query,
+            store=store,
+            idx=idx,
+            ebm=ebm,
+            v_store=v_store
+        )
         if web_results:
             was_web_search = True
             web_objects = [SearchResult(**r) for r in web_results]

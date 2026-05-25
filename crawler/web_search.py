@@ -244,30 +244,28 @@ def fetch_url(url: str, title: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _persist_crawled_pages(crawled_pages: List[Dict[str, Any]], query: str) -> int:
+def _persist_crawled_pages(
+    crawled_pages: List[Dict[str, Any]], 
+    query: str,
+    store: Optional[Any] = None,
+    idx: Optional[Any] = None,
+    ebm: Optional[Any] = None,
+    v_store: Optional[Any] = None
+) -> int:
     """
     COOPERATIVE CORPUS ENRICHMENT & DEDUPLICATION ALGORITHM
     =======================================================
     Persists web crawled documents permanently inside the JSON DocumentStore to expand local vocabulary.
-    
-    1. Size Filtering:
-       Only documents containing substantial text content are persisted:
-       $$|T| \geq 300\text{ characters}$$
-       
-    2. Document Formatting & Adapter Schema:
-       Formats the text into the structural Document v2 schema:
-       - Set Title: "[Crawled] {Original Title}"
-       - Extract Year: Matches $\text{regex\_search}(\text{"(19\\d{2}|20\\d{2})"})$ in Title/URL, otherwise default to "N/A"
-       - Metadata: Set genres to ["Reference", "web_crawled"] and source_url = url
-       
-    3. Deduplication Key Matching:
-       Uses `source_url` inside DocumentStore to prevent duplicate insertions:
-       $$\text{URL}_{new} \notin \text{Keys}(\text{Store.url\_index})$$
+    Updates the inverted index, EBM weights, and FAISS vector index in real-time if global instances are provided,
+    making the fallback search results instantly and permanently indexable for local search.
     """
     try:
-        from database.store import DocumentStore
-        store = DocumentStore()
+        if store is None:
+            from database.store import DocumentStore
+            store = DocumentStore()
+            
         added = 0
+        new_docs_dict = {}
         
         for page in crawled_pages:
             text = page.get("text", "")
@@ -310,17 +308,43 @@ def _persist_crawled_pages(crawled_pages: List[Dict[str, Any]], query: str) -> i
             
             doc_id = store.add_film(doc)
             added += 1
+            new_docs_dict[doc_id] = doc
             logger.info(f"Crawler persistió página como doc_id={doc_id}: {title}")
+            
+            # Indexar en el índice invertido en memoria en tiempo real
+            if idx:
+                idx.add_film(doc_id, doc)
         
         if added > 0:
+            # 1. Guardar store a disco
             store.save()
-            logger.info(f"Crawler enriqueció el corpus con {added} nuevos documentos web. "
-                        f"Total corpus: {len(store.documents)} docs. "
-                        f"(Los índices EBM/FAISS se actualizarán al reiniciar el servidor)")
+            
+            # 2. Guardar el índice invertido en disco e instanciar en memoria
+            if idx:
+                store.save_index(idx.index)
+                logger.info("[WEB-SEARCH-INDEX] InvertedIndex actualizado en memoria y persistido en index.json.")
+            
+            # 3. Recalcular pesos de EBM de forma atómica y persistirlos en disco
+            if ebm:
+                ebm.build_weights()
+                logger.info("[WEB-SEARCH-EBM] Pesos EBM TF-IDF recalculados y persistidos.")
+            
+            # 4. Inyectar de forma incremental en el almacén vectorial de FAISS en disco/memoria
+            if v_store:
+                success = v_store.add_documents_incremental(new_docs_dict)
+                if success:
+                    logger.info("[WEB-SEARCH-FAISS] Almacén vectorial FAISS actualizado incrementalmente en caliente.")
+                else:
+                    v_store.build_from_documents(store.documents)
+                    logger.warning("[WEB-SEARCH-FAISS] Reconstrucción total de FAISS como fallback completada.")
+                    
+            logger.info(
+                f"[INSTANT-INDEXING] ✓ ¡El corpus local fue enriquecido y re-indexado en caliente con {added} documentos web!"
+            )
         
         return added
     except Exception as e:
-        logger.error(f"Error persistiendo páginas crawleadas: {e}")
+        logger.error(f"Error persistiendo páginas crawleadas: {e}", exc_info=True)
         return 0
 
 
@@ -380,12 +404,19 @@ class WebSearchModule:
         url_lower = url.lower()
         return not any(domain in url_lower for domain in self.BLOCKED_DOMAINS)
 
-    def search_and_format(self, query: str) -> List[Dict[str, Any]]:
+    def search_and_format(
+        self,
+        query: str,
+        store: Optional[Any] = None,
+        idx: Optional[Any] = None,
+        ebm: Optional[Any] = None,
+        v_store: Optional[Any] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Pipeline completo de búsqueda web con crawler persistente:
+        Pipeline completo de búsqueda web con crawler persistente e indexación instantánea:
         1. Buscar en DuckDuckGo (con query enriquecida)
         2. Crawlear las páginas en paralelo (filtrando dominios basura)
-        3. Persistir las páginas en el DocumentStore (enriquecimiento del corpus)
+        3. Persistir e indexar las páginas en caliente en los motores locales activos (DocumentStore, InvertedIndex, EBM, FAISS)
         4. Indexación temporal FAISS para respuesta inmediata
         """
         logger.info(f"Disparando búsqueda web fallback y crawling para: '{query}'")
@@ -462,10 +493,10 @@ class WebSearchModule:
                                 "title": res["title"]
                             })
 
-        # 2. PERSISTIR las páginas crawleadas en el corpus local
-        #    (esto enriquece el DocumentStore para futuras consultas)
+        # 2. PERSISTIR e indexar las páginas crawleadas en el corpus local y en memoria
+        #    (esto enriquece el DocumentStore e índices de forma instantánea para futuras consultas locales)
         if crawled_pages:
-            _persist_crawled_pages(crawled_pages, query)
+            _persist_crawled_pages(crawled_pages, query, store, idx, ebm, v_store)
 
         # Fallback: si el crawl falló, usar snippets de DDG
         if not chunks_data:
