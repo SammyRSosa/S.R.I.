@@ -118,6 +118,13 @@ class DocumentStore:
 
         self.load()
 
+    def get_next_id(self) -> int:
+        """
+        Retorna de forma segura y encapsulada el siguiente ID secuencial que será asignado.
+        Respeta el principio de ocultamiento de datos de la POO.
+        """
+        return self._next_id
+
     # ─── Añadir documento ─────────────────────────────────────────────────────
 
     def add_film(self, film_data: dict) -> int:

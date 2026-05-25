@@ -48,3 +48,9 @@ htmlcov/
 data/documents.json
 data/index.json
 data/checkpoint.json
+
+# Archivos temporales de scratch (dumps muy pesados)
+scratch/*.json
+scratch/*.html
+scratch/*.txt
+

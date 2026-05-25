@@ -194,6 +194,86 @@ class VectorStore:
         self.save()
         logger.info("Índice FAISS finalizado con %d vectores.", self.index.ntotal)
 
+    def add_documents_incremental(self, new_documents: dict[int, dict]) -> bool:
+        """
+        Agrega de forma incremental nuevos documentos al índice FAISS existente y actualiza la persistencia.
+        
+        Lógica:
+        1. Si ya existe un índice binario guardado en disco y cargado en memoria (self.index.ntotal > 0),
+           utiliza este índice.
+        2. Si no, intenta cargarlo de disco usando load().
+        3. Si sigue sin existir un índice inicializado, retorna False para forzar la inicialización inicial.
+        4. Genera embeddings para los nuevos documentos utilizando sentence-transformers.
+        5. Normaliza los nuevos embeddings y los inyecta en el índice con index.add().
+        6. Actualiza los mapeos bidireccionales y persiste todo a disco de forma transaccional.
+        """
+        if not new_documents:
+            logger.info("No hay nuevos documentos para agregar incrementalmente.")
+            return True
+
+        # Asegurar que el índice actual está cargado.
+        if not self.in_memory and self.index_path and self.index_path.exists() and self.index.ntotal == 0:
+            try:
+                self.load()
+            except Exception as e:
+                logger.warning("Fallo al precargar el índice para actualización incremental: %s", e)
+
+        # Si el índice sigue vacío, no podemos hacer una actualización incremental
+        if self.index.ntotal == 0:
+            logger.info("El índice está vacío o no existe en disco. Se requiere inicialización completa.")
+            return False
+
+        try:
+            new_doc_ids = []
+            new_texts = []
+            
+            # Filtrar documentos que ya están indexados para evitar duplicados en el espacio vectorial
+            for doc_id, film_data in new_documents.items():
+                int_doc_id = int(doc_id)
+                if int_doc_id in self.doc_to_vector:
+                    logger.debug("El documento ID %d ya existe en el espacio vectorial. Omitiendo duplicado.", int_doc_id)
+                    continue
+                    
+                rich_text = film_data.get("rich_text", "")
+                if not rich_text:
+                    continue
+                    
+                new_doc_ids.append(int_doc_id)
+                new_texts.append(rich_text[:self.TEXT_LIMIT])
+
+            if not new_texts:
+                logger.info("Todos los nuevos documentos ya estaban indexados vectorialmente.")
+                return True
+
+            logger.info("[FAISS-INCREMENTAL] Generando embeddings para %d nuevos documentos...", len(new_texts))
+            
+            # Generar vectores de los nuevos textos
+            new_embeddings = self.model.encode(new_texts, show_progress_bar=False, convert_to_numpy=True)
+            
+            # Normalizar a L2 (para consistencia con Cosine Similarity)
+            faiss.normalize_L2(new_embeddings)
+            
+            # Guardar el número original de vectores para calcular correctamente los nuevos IDs vectoriales
+            old_ntotal = self.index.ntotal
+            
+            # Añadir directamente al índice FAISS en memoria
+            self.index.add(new_embeddings)
+            
+            # Actualizar mapeos bidireccionales
+            for i, doc_id in enumerate(new_doc_ids):
+                vector_id = old_ntotal + i
+                self.vector_to_doc[vector_id] = doc_id
+                self.doc_to_vector[doc_id] = vector_id
+                
+            # Guardar índice actualizado y mappings en disco
+            self.save()
+            logger.info("[FAISS-INCREMENTAL] ✓ Se agregaron %d vectores de forma incremental. Total en FAISS: %d", len(new_texts), self.index.ntotal)
+            return True
+            
+        except Exception as e:
+            logger.error("[FAISS-INCREMENTAL] Falló actualización incremental: %s", e)
+            return False
+
     def build_from_texts(self, texts: list[str]) -> None:
         """
         Codifica una lista de textos planos y construye el índice FAISS en memoria.

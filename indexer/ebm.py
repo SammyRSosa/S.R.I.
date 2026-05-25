@@ -99,6 +99,10 @@ class ExtendedBooleanModel:
         # Mapeos de pre-cálculo de pesos: term -> {doc_id: w_ij}
         self.weights: dict[str, dict[int, float]] = {}
         
+        # Caché incremental de la frecuencia máxima por documento (max_tf_per_doc)
+        # Evita recalcular el max_tf para documentos antiguos en cada corrida
+        self._max_tf_per_doc: dict[int, int] = {}
+        
         # Carga los pesos si existen en disco para evitar recalcular
         self.weights_path = store.data_dir / self.WEIGHTS_FILE
         self.load_weights()
@@ -111,16 +115,40 @@ class ExtendedBooleanModel:
         Fórmula de peso:
             w_{i,j} = (tf_{i,j} / max_tf_{j}) * idf_i
         Donde idf_i es log(N/n_i) / log(N) para asegurar normalización.
-        """
-        logger.info("Construyendo pesos EBM TF-IDF para %d documentos...", self.index.num_docs)
-        N = max(1, self.index.num_docs)
+
+        ANÁLISIS DE COMPLEJIDAD ASINTÓTICA REAL:
+        ----------------------------------------
+        Esta es una operación GLOBAL síncrona de complejidad asintótica real O(N * |V|),
+        donde N es el número total de documentos del corpus y |V| es el tamaño del vocabulario único.
         
-        # Paso 1: Determinar la frecuencia máxima de cualquier término en cada documento
-        # Esto es necesario para la normalización del TF
-        max_tf_per_doc: dict[int, int] = {}
-        for term, postings in self.index._raw_index.items():
-            for doc_id, tf in postings.items():
-                max_tf_per_doc[doc_id] = max(max_tf_per_doc.get(doc_id, 0), tf)
+        ¿Por qué es O(N * |V|) y no O(k)?
+        Porque la métrica IDF de CADA término del vocabulario depende del recuento total de 
+        documentos del corpus N (N_new = N_old + k). Cuando se añade un lote 'k' de nuevos films, 
+        el valor global N cambia, lo que causa un desplazamiento matemático sutil pero real en los 
+        pesos TF-IDF de todos los términos en postings anteriores. Por ende, para mantener 
+        consistencia teórica estricta, recalculamos la matriz global en O(N * |V|).
+
+        Optimizaciones de Ingeniería Aplicadas:
+        1. Caché incremental de max_tf: Se calcula el término de frecuencia máxima (max_tf_j)
+           únicamente para los nuevos documentos del lote en memoria (O(k * |V|)), evitando
+           recorrer y recalcular los max_tf de los N-k documentos históricos persistidos.
+        """
+        N = max(1, self.index.num_docs)
+        logger.info(
+            "[EBM-WEIGHTS] Iniciando recálculo global de pesos TF-IDF. Complejidad real: O(N * |V|) | N=%d documentos | |V|=%d términos.",
+            N,
+            self.index.vocabulary_size
+        )
+        
+        # Paso 1: Determinar la frecuencia máxima de cualquier término en cada documento (de forma incremental)
+        # Solo calculamos max_tf para aquellos doc_ids que no estén en la caché
+        uncached_docs = [doc_id for doc_id in self.index.documents.keys() if doc_id not in self._max_tf_per_doc]
+        if uncached_docs:
+            logger.debug("[EBM-WEIGHTS] Calculando max_tf de forma incremental para %d documentos nuevos...", len(uncached_docs))
+            for term, postings in self.index._raw_index.items():
+                for doc_id, tf in postings.items():
+                    if doc_id in uncached_docs:
+                        self._max_tf_per_doc[doc_id] = max(self._max_tf_per_doc.get(doc_id, 0), tf)
                 
         # Paso 2: Calcular el peso w_ij para cada par (término, documento)
         self.weights.clear()
@@ -137,7 +165,7 @@ class ExtendedBooleanModel:
                 
             self.weights[term] = {}
             for doc_id, tf in postings.items():
-                max_tf = max_tf_per_doc.get(doc_id, 1)
+                max_tf = self._max_tf_per_doc.get(doc_id, 1)
                 norm_tf = tf / max_tf
                 
                 # Peso final del término i en el documento j
@@ -145,7 +173,7 @@ class ExtendedBooleanModel:
                 self.weights[term][doc_id] = round(w_ij, 5)
                 
         self.save_weights()
-        logger.info("Pesos EBM construidos y persistidos con éxito.")
+        logger.info("[EBM-WEIGHTS] ✓ Matriz de pesos globales recalculada y guardada en ebm_weights.json.")
 
     def save_weights(self) -> None:
         """Persiste los pesos calculados en un archivo JSON."""

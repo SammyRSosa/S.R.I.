@@ -44,19 +44,19 @@ Hola! Te explico paso a paso el flujo completo de funcionamiento de esta aplicac
 
 #### 1. **Fase de Adquisición de Datos (Crawling)**
    - **Objetivo**: Recopilar datos de películas desde fuentes externas para crear un corpus (conjunto de documentos) rico en texto.
-   - **Fuentes principales**:
-     - **TMDB (The Movie Database)**: API gratuita que proporciona metadatos estructurados como título, año, director, reparto, géneros, presupuesto, ingresos, calificaciones, etc. Se usa una estrategia híbrida:
-       - **Estrategia A**: Películas populares (ordenadas por `popularity.desc`).
-       - **Estrategia B**: Películas de calidad (ordenadas por `vote_average.desc` con al menos 500 votos).
-     - **Letterboxd**: Sitio web de reseñas de usuarios. Se scrapea hasta 15 reseñas por película para obtener texto en lenguaje natural (críticas subjetivas).
-   - **Proceso**:
-     - Se obtienen listas de películas básicas de TMDB (páginas de 20 películas cada una).
-     - Para cada película, se filtra por calidad (ej.: al menos 50 votos, sinopsis no vacía, idioma inglés).
-     - Se obtienen detalles completos de TMDB (director, cast, etc.).
-     - Se scrapean reseñas de Letterboxd usando el título, año e IMDb ID.
-     - Se construye un "rich_text" concatenando: título, tagline, géneros, director, cast, sinopsis y reseñas.
-   - **Herramientas**: tmdb_client.py (cliente TMDB) y scraper.py (scraper Letterboxd).
-   - **Resultado**: Documentos JSON con schema v2 (título, año, metadata, rich_text, número de reseñas).
+   - **Estrategias de Rastreo**:
+     - **Estrategia A (API TMDB + Letterboxd Scraper)**: Consulta paginada y enriquecimiento ad-hoc para el corpus inicial de 1,650 películas.
+     - **Estrategia B (Link-Traversal Focused Crawler Puro - Metacritic)**: Rastreo hipertextual autónomo sobre el grafo HTML de Metacritic (exigido por la cátedra) para la expansión orgánica del corpus.
+   - **El Traversal Spider (`MetacriticTraversalSpider`)**:
+     - **Seed URL (Semilla)**: Directorio de películas `https://www.metacritic.com/browse/movie/`.
+     - **Frontera de Rastreo (Queue)**: BFS puro utilizando `collections.deque`.
+     - **Evitación de Ciclos**: Conjunto (`set`) en memoria para registrar URLs ya visitadas.
+     - **Capa Ética con Caché TTL (Robots.txt)**: Verificación dinámica de directivas mediante `urllib.robotparser`. Para evitar peticiones repetitivas a Metacritic, se implementó una **caché en disco con TTL de 24 horas** (`data/robots_cache.json`). Si la caché es válida, se parsea en memoria al instante sin tocar la red, ahorrando ancho de banda y protegiendo el pipeline contra cuellos de botella de red durante evaluaciones rápidas.
+     - **Bypass de Firewalls (WAF Bypass)**: Uso de `curl_cffi.requests.Session` impersonando a Chrome 124 para descargar el robots.txt y las páginas, neutralizando bloqueos de Cloudflare por TLS Fingerprinting.
+     - **Focused Crawling (Filtros Regex)**: Exclusividad estricta para enlaces de paginación del índice (`/browse/movie/?page=X`), fichas de detalles (`/movie/[slug]/`) y páginas de reseñas de usuarios (`/movie/[slug]/user-reviews/`).
+     - **Ingestión e Indexación Atómica**: Al descubrir un film, se extraen sus metadatos principales (NEXT_DATA JSON / DOM fallback) y críticas, se valida contra el `DocumentStore` (evitando duplicidad por slug), y si es nuevo se guarda y se disparan de forma incremental `InvertedIndex`, `EBM Weights` y `VectorStore (FAISS)`.
+   - **Herramientas**: `tmdb_client.py` (API TMDB), `scraper.py` (reviews Letterboxd), y `metacritic_spider.py` (Link-Traversal focused spider).
+   - **Resultado**: Crecimiento orgánico controlado del corpus mediante autoevaluaciones del grafo de la Web.
 
 #### 2. **Fase de Indexación**
    - **Objetivo**: Crear un índice invertido para búsquedas rápidas, basado en el texto "rich_text" de cada documento.
@@ -75,7 +75,7 @@ Hola! Te explico paso a paso el flujo completo de funcionamiento de esta aplicac
    - **Componentes**:
      - **DocumentStore**: Almacena documentos en documents.json (JSON con ~1,650 películas).
      - **Checkpoint**: Sistema para reanudar procesos interrumpidos (guarda estado en checkpoint.json).
-     - **VectorStore**: Para búsqueda semántica, usa embeddings (representaciones vectoriales) con FAISS (librería de búsqueda aproximada). Convierte el rich_text en vectores y permite búsquedas por similitud coseno.
+     - **VectorStore**: Capa semántica de alta fidelidad basada en embeddings vectoriales generados por `sentence-transformers` e indexación de vecinos más cercanos vía FAISS (`faiss.IndexFlatIP`). Soporta **indexación incremental real** a través de `add_documents_incremental`. En lugar de recalcular el espacio vectorial completo de ~1,650 películas en disco (que es costoso en CPU/I/O), el sistema detecta de forma dinámica los nuevos documentos del crawler, computa exclusivamente sus representaciones neurales, las inyecta directamente al índice cargado mediante `index.add()` y guarda la nueva estructura. Cuenta con fallback automático completo a reconstrucción total en caso de corrupción o ausencia del archivo binario.
    - **Herramientas**: store.py, checkpoint.py, vector_store.py.
    - **Resultado**: Archivos JSON persistentes que se cargan en memoria al iniciar la aplicación.
 
@@ -137,4 +137,4 @@ El sistema está completamente dockerizado para garantizar la máxima reproducib
        docker run -d -p 8000:8000 --env-file .env -v ${PWD}/data:/app/data --name oscar-insight-app oscar-insight:latest
        ```
   3. **Acceso al sistema**:
-     Abra `http://localhost:8000/` en el navegador para interactuar con la interfaz visual.
+     Abra `http://localhost:8000/` en el navegador para interactuar con la interfaz visual.

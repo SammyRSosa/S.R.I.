@@ -16,14 +16,16 @@ WORKDIR /build
 
 COPY requirements.txt .
 RUN pip install --upgrade pip && \
-    pip install --prefix=/install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt
+
 
 # Descargar recursos NLTK en tiempo de build (evita descarga en runtime)
-RUN PYTHONPATH=/install/lib/python3.11/site-packages python -c "\
+RUN python -c "\
 import nltk; \
-nltk.download('punkt',     download_dir='/install/nltk_data'); \
-nltk.download('punkt_tab', download_dir='/install/nltk_data'); \
-nltk.download('stopwords', download_dir='/install/nltk_data')"
+nltk.download('punkt',     download_dir='/usr/share/nltk_data'); \
+nltk.download('punkt_tab', download_dir='/usr/share/nltk_data'); \
+nltk.download('stopwords', download_dir='/usr/share/nltk_data')"
 
 
 # ── Etapa 2: runtime ────────────────────────────────────────────────────────────
@@ -36,10 +38,10 @@ LABEL maintainer="SRI 2025-2026 Team" \
 WORKDIR /app
 
 # Dependencias instaladas desde el builder
-COPY --from=builder /install /usr/local
+COPY --from=builder /usr/local /usr/local
 
 # Datos NLTK pre-descargados
-COPY --from=builder /install/nltk_data /usr/share/nltk_data
+COPY --from=builder /usr/share/nltk_data /usr/share/nltk_data
 
 # Variables de entorno
 ENV NLTK_DATA=/usr/share/nltk_data \
