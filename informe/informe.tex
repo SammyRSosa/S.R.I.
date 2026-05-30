@@ -1,0 +1,302 @@
+\documentclass[10pt,a4paper]{llncs}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{graphicx}
+
+\begin{document}
+
+\title{Oscar Insight Search}
+\subtitle{Sistema de Recuperación de Información Cinematográfico}
+
+\author{Daniela De La Caridad Guerrero Alvarez \and
+        Ruben Martinez Rojas \and
+        Sammy Raul Sosa Justiz}
+
+\institute{Universidad de La Habana \\}
+
+\maketitle
+
+\begin{abstract}
+Oscar Insight Search es un sistema de recuperación de información enfocado en el dominio cinematográfico y los Premios Oscar. El sistema permite consultas en lenguaje natural sobre un corpus de 1\,623 películas (9.8\,MB) y aproximadamente 4\,800 reseñas de usuarios. Se implementan múltiples paradigmas de búsqueda: un Modelo Booleano Extendido (EBM) para búsqueda léxica con operadores booleanos y puntuación continua, una base de datos vectorial con FAISS y el modelo multilingüe \textit{paraphrase-multilingual-MiniLM-L12-v2} para búsqueda semántica, y un módulo RAG con Groq/Llama3-8b-8192 para respuestas generativas. El sistema integra además un \textit{Link-Traversal Focused Crawler} que recorre el grafo hipertextual de Metacritic mediante BFS, con cumplimiento verificado de \texttt{robots.txt}, indexación por lotes e indexación incremental en caliente. Los resultados muestran un Recall@5 de 0.75 y un MRR de 0.63, confirmando una calidad sólida de búsqueda para el dominio elegido.
+\end{abstract}
+
+\keywords{Cine, Recuperación de Información, Modelo Booleano Extendido, Búsqueda Semántica, RAG, FAISS, Focused Crawling}
+
+\section{Introducción, Dominio Temático y Arquitectura del Sistema}
+
+\subsection{Motivación y Dominio}
+
+Oscar Insight Search es un sistema de búsqueda y recuperación de información en lenguaje natural enfocado en el cine y los Premios Oscar. Permite realizar consultas libres para obtener películas, directores, actores y géneros relevantes.
+
+Este dominio combina precisión al buscar nombres propios (directores, títulos) con la necesidad de entender semánticamente descripciones libres. El corpus consta de 1\,623 películas (9.8\,MB) y unas 4\,800 reseñas de usuarios, escala idónea para la evaluación sin costos de infraestructura.
+
+\subsection{Fuentes de Información del Corpus}
+
+Los datos provienen de dos fuentes complementarias: la API oficial de TMDB (\textit{The Movie Database}), que provee metadatos estructurados (director, reparto, géneros, sinopsis y popularidad); y Metacritic, de donde se extraen reseñas extensas de usuarios que aportan riqueza textual para la búsqueda semántica. El corpus abarca películas de 1970 a 2025 de los géneros principales.
+
+\subsection{Arquitectura Modular del Sistema}
+
+El sistema se organiza en módulos independientes. La Tabla~\ref{tab:modulos} detalla los componentes implementados.
+
+\begin{table}[htbp]
+\caption{Módulos del sistema y estado de implementación}
+\centering
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Módulo} & \textbf{Estado} \\
+\midrule
+Adquisición de datos (Crawler + Scraper) & Implementado \\
+Crawling hipertextual (BFS Focused Crawler) & Implementado \\
+Indexación (Índice Invertido + TF-IDF) & Implementado \\
+Recuperador no básico (EBM, p-norma) & Implementado \\
+Base de datos vectorial (FAISS + ST multilingüe) & Implementado \\
+Módulo RAG (Groq, Llama3-8b-8192) & Implementado \\
+Búsqueda web automática con indexación en caliente & Implementado \\
+Posicionamiento híbrido multifactorial & Implementado \\
+Interfaz visual (web) & Implementado \\
+Recomendación basada en contenido & Implementado \\
+Evaluación cuantitativa & Implementado \\
+\bottomrule
+\end{tabular}
+\label{tab:modulos}
+\end{table}
+
+\section{Módulo de Adquisición de Datos}
+
+\subsection{Recolección desde TMDB}
+
+El sistema se conecta a la API de TMDB mediante dos estrategias: una que prioriza popularidad (asegurando títulos conocidos) y otra orientada a la calidad crítica (puntuación alta y mínimo de 500 valoraciones). Para cada película se obtienen en una sola llamada los metadatos completos: director, reparto, géneros, ID de IMDB, lema y popularidad. Se respeta el límite de tasa (\textit{rate limiting}) mediante pausas de 0.27\,s entre solicitudes.
+
+\subsection{Extracción de Reseñas en Metacritic}
+
+Para superar el bloqueo de Metacritic, se emplea \textit{suplantación de huella TLS} con \texttt{curl\_cffi}, emulando el comportamiento de Chrome. El flujo: construye la URL del título, solicita la página con cabeceras reales, analiza el HTML buscando enlaces internos, selecciona la coincidencia exacta de título/año, extrae reseñas de usuarios de más de 100 caracteres y maneja fallos con rutas alternativas. Se respeta \texttt{robots.txt} y se aplican pausas aleatorias de 1.5 a 3.5\,s.
+
+\subsection{Crawling Hipertextual Puro: Link-Traversal Focused Crawler}
+
+Se implementó un \textit{Focused Crawler} en \texttt{MetacriticTraversalSpider} que explora el grafo web de Metacritic mediante recorrido en anchura (BFS), cumpliendo los requisitos de rastreo hipertextual autónomo de la cátedra.
+
+\subsubsection{Estructura del Grafo de Rastreo.}
+
+La frontera (\textit{frontier}) usa una cola de doble extremo (\texttt{deque}) para BFS, y un conjunto de visitados (\textit{visited set}) para evitar ciclos. El spider reconoce cinco tipos de nodos mediante expresiones regulares: índices de paginación, detalles de películas, reseñas de usuarios, perfiles de personas (directores/actores) y géneros. Esto permite un verdadero focused crawling: salta de una película al perfil de su director y de ahí a otras de sus películas, navegando de forma orgánica e hipertextual.
+
+\subsubsection{Cumplimiento de Robots.txt con Caché TTL.}
+
+Toda URL se valida contra las directivas de \texttt{robots.txt}. Para optimizar rendimiento durante las pruebas, se implementa una caché física (\texttt{data/robots\_cache.json}) con TTL de 24 horas. Si la caché está vigente se lee de disco; si expira, se descarga y actualiza. Este mecanismo es compartido por los scrapers, el crawler y el módulo de búsqueda web externo.
+
+\subsubsection{Indexación por Lotes.}
+
+Para evitar la sobrecarga de I/O y CPU por reconstrucción del índice en cada iteración, el spider acumula los documentos en un búfer en memoria. Al terminar, ejecuta una indexación por lotes atómica: escribe en \texttt{DocumentStore}, actualiza el índice invertido, recalcula los pesos del EBM e inyecta incrementalmente los vectores en FAISS.
+
+\subsection{Búsqueda Web en Tiempo Real con Indexación en Caliente}
+
+Ante consultas fuera de cobertura, el fallback de búsqueda web consulta DuckDuckGo para obtener las cinco páginas más relevantes. Tras validar sus respectivos \texttt{robots.txt}, descarga el HTML en paralelo, extrae el texto limpio y lo segmenta en fragmentos de 600 caracteres (solapamiento de 120). Estos se codifican e indexan en una estructura FAISS efímera para recuperar los pasajes más afines.
+
+Los documentos web hallados se indexan en caliente de manera permanente. El endpoint transfiere las referencias en memoria al módulo de persistencia, que realiza inserciones y escrituras atómicas en disco: actualiza \texttt{index.json}, recalcula pesos EBM usando una caché de frecuencia máxima (\texttt{\_max\_tf\_per\_doc}) para evitar reprocesar el histórico, y añade los nuevos embeddings normalizados $L_2$ en FAISS mediante \texttt{index.add()} de forma incremental. Esto reduce el tiempo de consultas repetidas de 21.5\,s a solo 0.037\,s (99.8\% más rápido).
+
+\subsection{Sistema de Progreso Persistente}
+
+La recolección inicial puede tardar varias horas y es susceptible de interrupciones. Para evitar empezar de cero, el sistema guarda un registro del progreso: qué películas ya fueron procesadas, en qué página se detuvo cada estrategia de búsqueda y cuántos documentos han sido indexados. Si el proceso se reinicia, retoma automáticamente desde donde lo dejó sin duplicar información.
+
+\section{Almacenamiento Documental e Indexación}
+
+\subsection{Almacenamiento del Corpus}
+
+El corpus se almacena en un JSON de 9.8\,MB. Cada película se registra con metadatos estructurados y un texto unificado (sinopsis, reseñas y entidades) que alimenta los índices léxico y vectorial. Se soporta compatibilidad con esquemas heredados y se previene la duplicidad validando IDs de TMDB y URLs de origen antes de indexar.
+
+\subsection{Estructura del Índice Invertido}
+
+El índice invertido es la estructura léxica central: asocia términos con listas de apariciones (\textit{postings}) y sus frecuencias intra-documento. Esto evita búsquedas secuenciales sobre los 1\,623 archivos. El vocabulario comprende unos 28\,000 términos normalizados guardados en disco (9.3\,MB).
+
+\subsection{Procesamiento y Normalización del Texto}
+
+El texto se procesa en cinco fases: 1) conversión a minúsculas, 2) tokenización con respeto a contracciones, 3) remoción de puntuación, 4) eliminación de palabras vacías (\textit{stopwords}) en inglés/español y términos ruidosos del dominio (como \textit{movie, director}), y 5) lematización morfológica (\textit{stemming}) mediante el algoritmo Snowball. Este flujo es idéntico para documentos y consultas.
+
+\section{Módulo Recuperador --- Modelo Booleano Extendido}
+
+\subsection{Justificación de la Selección del Modelo}
+
+Se adoptó el Modelo Booleano Extendido (EBM)~\cite{salton1983extended,baezayates2011modern}. El modelo booleano clásico admite operadores lógicos de forma directa (ej. \textit{Nolan AND bomb}), pero carece de ordenación por relevancia. Por otro lado, el modelo vectorial genera puntuaciones continuas pero no soporta operadores nativos. El EBM une ambas ventajas: genera una puntuación continua en $[0, 1]$, procesa AND y OR mediante normas espaciales, tolera la ausencia parcial de términos modulada por el parámetro $p$, y garantiza alta precisión para entidades nombradas de este dominio.
+
+\subsection{Fundamento Matemático}
+
+El EBM evalúa la relevancia mediante la $p$-norma. Los pesos TF-IDF de los términos se normalizan en $[0,1]$:
+
+\begin{equation}
+w(i,j) = \frac{tf(i,j)}{\text{max\_tf}(j)} \times \frac{\log(N/n_i)}{\log(N)}
+\label{eq:tfidf}
+\end{equation}
+
+donde $tf(i,j)$ es la frecuencia de $i$ en $j$, $\text{max\_tf}(j)$ la frecuencia máxima en el documento, $N=1\,623$ y $n_i$ los documentos con el término $i$.
+
+La similitud para consultas con operador OR es:
+
+\begin{equation}
+\text{Sim}_{\text{OR}}(d,q) = \left[\frac{w_1^p + w_2^p + \cdots + w_m^p}{m}\right]^{1/p}
+\label{eq:or}
+\end{equation}
+
+Para consultas con operador AND:
+
+\begin{equation}
+\text{Sim}_{\text{AND}}(d,q) = 1 - \left[\frac{(1-w_1)^p + \cdots + (1-w_m)^p}{m}\right]^{1/p}
+\label{eq:and}
+\end{equation}
+
+El parámetro $p=2.0$ (distancia euclidiana) provee un balance entre el modelo vectorial ($p \to 1$) y el booleano puro ($p \to \infty$).
+
+\subsection{Cálculo de Pesos y Proceso de Búsqueda}
+
+El cálculo se realiza en dos fases (frecuencia máxima e indexación de pesos) y se persiste para evitar sobrecostos en tiempo de ejecución. En la fase de consulta, se filtran los documentos candidatos que posean al menos un término de la query, se evalúa la $p$-norma y se retorna el ranking ordenado descendentemente.
+
+\section{Base de Datos Vectorial y Módulo RAG}
+
+\subsection{Búsqueda Semántica}
+
+Para subsanar las limitaciones léxicas del EBM (como no relacionar \textit{armas nucleares} con \textit{bomba atómica}), el sistema implementa búsqueda semántica basada en embeddings densos.
+
+Se usa el modelo multilingüe \textit{paraphrase-multilingual-MiniLM-L12-v2}~\cite{reimers2019sentence}, que proyecta textos en un espacio común de 384 dimensiones. Esto alinea semánticamente consultas en español con el corpus en inglés, agrupando conceptos análogos independientemente del idioma.
+
+La búsqueda vectorial se apoya en FAISS~\cite{johnson2019billion} con un índice exacto de producto interno (\texttt{IndexFlatIP}), equivalente a la similitud de coseno al normalizar vectores bajo $L_2$. El índice vectorial (2.4\,MB) responde en milisegundos y admite adición incremental en caliente mediante \texttt{index.add()} sin reconstrucción total.
+
+\subsection{Módulo RAG --- Generación de Respuestas Inteligentes}
+
+El módulo RAG~\cite{lewis2020retrieval} actúa como asistente conversacional usando Llama3-8b-8192 mediante la API de Groq. Para mitigar alucinaciones, el \textit{prompt} instruye al modelo a ceñirse exclusivamente al contexto provisto, citar explícitamente título y año de las películas y responder en el idioma del usuario. El contexto estructurado incluye metadatos (director, reparto, géneros), relevancia y texto descriptivo, ordenados de forma descendente.
+
+\section{Posicionamiento, Ranking y Búsqueda Web Automática}
+
+\subsection{Algoritmo de Ranking Multifactorial}
+
+El ranking final fusiona las puntuaciones de EBM y búsqueda vectorial mediante una combinación lineal ponderada configurable:
+
+\begin{equation}
+\text{score\_base} = \alpha \cdot s_{\text{EBM}} + \beta \cdot s_{\text{vec}}
+\label{eq:base}
+\end{equation}
+
+donde $\alpha=0.6$ y $\beta=0.4$ por defecto. Se incorporan dos factores adicionales:
+
+\begin{equation}
+\text{score\_final} = \text{score\_base} + \text{factor\_pop} + \text{factor\_fresc}
+\label{eq:ranking}
+\end{equation}
+
+El factor de popularidad (hasta 10\% extra basado en TMDB) y de frescura (hasta 5\% extra para filmes recientes) resuelven empates frecuentes y priorizan resultados familiares y novedosos.
+
+\subsection{Detección de Información Insuficiente}
+
+La búsqueda externa se activa si se recuperan menos de tres documentos locales o si la puntuación del resultado principal es menor a 0.15. En tal caso, los pasajes de la web se descarga y fusionan con el corpus y se reordenan por puntuación final.
+
+\section{Interfaz Visual y Módulo de Recomendación}
+
+\subsection{Arquitectura de la Interfaz Web}
+
+La interfaz es una Single Page Application (SPA). El backend FastAPI carga los índices en memoria al inicio para respuestas inmediatas. Expone endpoints para búsqueda híbrida con fallback, RAG conversacional, recomendación, estado del sistema y API interactiva.
+
+Los resultados muestran su puntuación desglosada (EBM vs. vectorial) y las fuentes web se etiquetan distintivamente. Se puede invocar a RAG o recomendaciones desde cualquier película del ranking.
+
+\subsection{Módulo de Recomendación}
+
+Las recomendaciones se basan en contenido sin requerir perfiles de usuario. Combina similitud textual (coseno de vectores TF-IDF) y estructural de metadatos (50\% géneros, 30\% director y 20\% reparto) en partes iguales:
+
+\begin{equation}
+\text{score} = 0.5 \cdot \text{cos\_TF-IDF} + 0.5 \cdot (0.5 \cdot J_{\text{gen}} + 0.3 \cdot \delta_{\text{dir}} + 0.2 \cdot J_{\text{rep}})
+\label{eq:recomendacion}
+\end{equation}
+
+Para \textit{Avatar: Fire and Ash}, el sistema sugirió las precuelas con una similitud $>50$\%, y otros títulos del director con un $\sim20$\%.
+
+\section{Módulo de Evaluación}
+
+\subsection{Metodología}
+
+Se diseñó un conjunto de referencia (\textit{ground truth}) de seis consultas de prueba que cubren búsquedas directas, conceptuales, abstractas e históricas. Se evalúa el Top-5 contrastando los resultados del motor híbrido con los juicios de relevancia humanos.
+
+\subsection{Resultados Cuantitativos}
+
+La Tabla~\ref{tab:resultados} presenta las métricas de evaluación obtenidas.
+
+\begin{table}[htbp]
+\caption{Resultados cuantitativos de evaluación}
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Métrica} & \textbf{Resultado} & \textbf{Interpretación} \\
+\midrule
+Precision@5 & 0.1667 & Moderada; solo un documento relevante marcado por consulta \\
+Recall@5 & 0.7500 & Excelente: el 75\% de los relevantes aparecen en top 5 \\
+F1@5 & 0.2698 & Balance armónico entre precisión y recall \\
+MRR & 0.6317 & Primer relevante aparece en promedio en puesto 1.6 \\
+NDCG@5 & 0.6125 & 61.25\% de la calidad de ranking óptima posible \\
+\bottomrule
+\end{tabular}
+\label{tab:resultados}
+\end{table}
+
+\subsection{Análisis de los Resultados}
+
+El MRR (0.63) y el NDCG@5 (0.61) corroboran la efectividad del ranking. El Recall@5 (0.75) valida que tres de cada cuatro relevantes se sitúan en el Top-5.
+
+La modesta precisión (0.17) obedece a un sesgo metodológico: al definir un único relevante estricto por consulta en el \textit{ground truth}, las demás películas pertinentes en el Top-5 computan como falsos positivos.
+
+\section{Infraestructura y Despliegue}
+
+\subsection{Organización del Proyecto}
+
+La estructura se divide en: API/interfaz, módulo RAG, adquisición de datos (TMDB, Metacritic, crawler BFS y fallback), almacenamiento persistente (corpus de 9.8\,MB, índice léxico de 9.3\,MB e índice vectorial de 2.4\,MB) y el suite de evaluación formal.
+
+\subsection{Dependencias Principales}
+
+El desarrollo se sustenta en software libre: \texttt{requests} (TMDB), \texttt{curl-cffi} (red), \texttt{beautifulsoup4} y \texttt{lxml} (parseo HTML), \texttt{nltk} (procesamiento de lenguaje), \texttt{sentence-transformers} (embeddings semánticos), \texttt{faiss-cpu} (búsqueda vectorial), \texttt{fastapi} y \texttt{uvicorn} (servidor REST), \texttt{groq} (RAG) y \texttt{python-dotenv} (configuración).
+
+\subsection{Despliegue con Docker}
+
+Un contenedor Docker unifica el despliegue mediante una compilación y ejecución estándar. Solo requiere configurar la API Key de Groq para habilitar el RAG conversacional, degradándose de forma controlada a búsqueda pura si no está disponible.
+
+\section{Deficiencias, Trabajo Futuro y Conclusiones}
+
+\subsection{Deficiencias Identificadas}
+
+Se identificaron limitaciones operativas: 1) el \textit{ground truth} reducido (seis consultas) requiere ampliarse a más de cincuenta para robustez estadística; 2) no hay expansión de consultas, afectando términos sinónimos ausentes del vocabulario; 3) las recomendaciones no incluyen filtrado colaborativo; y 4) el módulo RAG depende de APIs de terceros.
+
+\subsection{Conclusiones}
+
+Oscar Insight Search evidencia las ventajas de hibridar paradigmas de recuperación. EBM garantiza precisión ante nombres propios y operadores exactos; la búsqueda semántica multilingüe descifra la intención del usuario cruzando barreras idiomáticas; y el BFS Focused Crawler expande el corpus orgánicamente navegando el grafo hipertextual de Metacritic. El fallback de búsqueda web automatiza el enriquecimiento en caliente de información no local, reduciendo la latencia de visitas subsecuentes. Finalmente, RAG y recomendación enriquecen la experiencia del usuario final.
+
+Los resultados empíricos (Recall@5 = 0.75, MRR = 0.63) validan la solidez y efectividad del sistema en el dominio cinematográfico, sentando una base para incorporar en el futuro personalización y multimodalidad.
+
+\begin{thebibliography}{5}
+
+\bibitem{salton1983extended}
+Salton, G., Fox, E.~A., Wu, H.: Extended Boolean information retrieval.
+\newblock \textit{Communications of the ACM}, 26(11), 1022--1036 (1983)
+
+\bibitem{baezayates2011modern}
+Baeza-Yates, R., Ribeiro-Neto, B.: \textit{Modern Information Retrieval: The
+  Concepts and Technology behind Search}, 2nd edn. Addison-Wesley Professional
+(2011)
+
+\bibitem{reimers2019sentence}
+Reimers, N., Gurevych, I.: Sentence-BERT: Sentence Embeddings using Siamese
+BERT-Networks.
+\newblock In: \textit{Proceedings of EMNLP-IJCNLP 2019}, Hong Kong (2019)
+
+\bibitem{lewis2020retrieval}
+Lewis, P., et~al.: Retrieval-Augmented Generation for Knowledge-Intensive NLP
+Tasks.
+\newblock In: \textit{Advances in Neural Information Processing Systems
+  (NeurIPS) 2020} (2020)
+
+\bibitem{johnson2019billion}
+Johnson, J., Douze, M., Jegou, H.: Billion-scale similarity search with GPUs.
+\newblock \textit{IEEE Transactions on Big Data}, 7(3), 535--547 (2019)
+
+\end{thebibliography}
+
+\end{document}
